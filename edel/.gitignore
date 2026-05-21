@@ -3,4 +3,9 @@ build/
 !gradle/wrapper/gradle-wrapper.jar
 .idea/
 *.iml
-beispiele/*.class
+
+# In beispiele/ nur Quell- und Erwartungsdateien versionieren
+# (erzeugte .class-Dateien und native Programme bleiben aussen vor).
+beispiele/*
+!beispiele/*.edel
+!beispiele/*.aus

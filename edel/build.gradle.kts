@@ -67,3 +67,22 @@ tasks.register<Jar>("fatJar") {
 tasks.named("build") {
     dependsOn("fatJar")
 }
+
+// Uebersetzt das edel-Werkzeug selbst mit GraalVM native-image zu einem
+// eigenstaendigen, schnell startenden Binaerprogramm (build/edel).
+tasks.register<Exec>("nativeCompile") {
+    group = "build"
+    description = "Baut das edel-Werkzeug als GraalVM-Native-Image (build/edel)."
+    dependsOn("fatJar")
+    val jar = layout.buildDirectory.file("libs/edel.jar").get().asFile
+    val ausgabe = layout.buildDirectory.file("edel").get().asFile
+    val nativeImage = File(System.getProperty("java.home"), "bin/native-image")
+    commandLine(
+        if (nativeImage.isFile) nativeImage.absolutePath else "native-image",
+        "--no-fallback",
+        "-jar", jar.absolutePath,
+        "-o", ausgabe.absolutePath,
+    )
+    doFirst { ausgabe.parentFile.mkdirs() }
+    doLast { println("Natives edel-Werkzeug erzeugt: ${ausgabe.path}") }
+}

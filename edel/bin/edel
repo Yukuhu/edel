@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
-# Starter fuer den Edel-Interpreter. Erwartet ein gebautes edel.jar.
+# Starter fuer das edel-Werkzeug.
+# Bevorzugt das native GraalVM-Binaerprogramm; faellt sonst auf das Jar zurueck.
 set -euo pipefail
 
 WURZEL="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+NATIV="$WURZEL/build/edel"
 JAR="$WURZEL/build/libs/edel.jar"
 
-if [[ ! -f "$JAR" ]]; then
-    echo "edel.jar wurde nicht gefunden." >&2
-    echo "Bitte zuerst './gradlew fatJar' (oder './gradlew build') ausfuehren." >&2
-    exit 1
+if [[ -x "$NATIV" ]]; then
+    exec "$NATIV" "$@"
 fi
 
-exec java -jar "$JAR" "$@"
+if [[ -f "$JAR" ]]; then
+    exec java -jar "$JAR" "$@"
+fi
+
+echo "Weder das native edel-Programm noch edel.jar wurde gefunden." >&2
+echo "Bitte zuerst './gradlew fatJar' (Jar) oder './gradlew nativeCompile' (nativ) ausfuehren." >&2
+exit 1
