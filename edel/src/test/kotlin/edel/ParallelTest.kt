@@ -130,4 +130,52 @@ class ParallelTest {
             "funktion start() { drucke(laut(1) + laut(2)) }"
         assertEquals(0, gabelungen(quelle))
     }
+
+    // ---- Streuschleifen (parallel map) --------------------------------------
+
+    @Test
+    fun erkenntStreuschleife() {
+        val quelle = "funktion start() { ver xs = Liste(0, 0, 0, 0, 0) " +
+            "für i von 0 bis 4 { xs.setze(i, i * i) } drucke(xs) }"
+        assertEquals(1, analysiere(quelle).parallelplan!!.streuAnzahl)
+    }
+
+    @Test
+    fun streuschleifeLiefertKorrektesErgebnis() {
+        val quelle = "funktion start() { ver xs = Liste(0, 0, 0, 0, 0) " +
+            "für i von 0 bis 4 { xs.setze(i, i * i) } drucke(xs) }"
+        assertEquals(listOf("[0, 1, 4, 9, 16]"), laufe(quelle))
+    }
+
+    @Test
+    fun gelesenesZielVerhindertStreuung() {
+        // Liest 'xs' (das Streuziel) -> moegliche Wettlaufbedingung -> sequentiell.
+        val quelle = "funktion start() { ver xs = Liste(0, 0, 0) " +
+            "für i von 0 bis 2 { xs.setze(i, xs.länge()) } drucke(xs) }"
+        assertEquals(0, analysiere(quelle).parallelplan!!.streuAnzahl)
+    }
+
+    // ---- Unabhaengige 'sei'-Gruppen -----------------------------------------
+
+    @Test
+    fun erkenntUnabhaengigeSeiGruppe() {
+        val quelle = "funktion f(n: Ganzzahl): Ganzzahl { zurück n * n }\n" +
+            "funktion start() { sei a = f(10) sei b = f(20) sei c = f(30) drucke(a + b + c) }"
+        assertEquals(1, analysiere(quelle).parallelplan!!.gruppenAnzahl)
+    }
+
+    @Test
+    fun seiGruppeLiefertExaktesErgebnis() {
+        val quelle = "funktion f(n: Ganzzahl): Ganzzahl { zurück n * n }\n" +
+            "funktion start() { sei a = f(10) sei b = f(20) sei c = f(30) drucke(a + b + c) }"
+        assertEquals(listOf("1400"), laufe(quelle))
+    }
+
+    @Test
+    fun abhaengigeSeiBindungWirdNichtGruppiert() {
+        // 'b' liest 'a' -> die Bindungen sind nicht unabhaengig.
+        val quelle = "funktion f(n: Ganzzahl): Ganzzahl { zurück n * n }\n" +
+            "funktion start() { sei a = f(2) sei b = f(a) drucke(b) }"
+        assertEquals(0, analysiere(quelle).parallelplan!!.gruppenAnzahl)
+    }
 }

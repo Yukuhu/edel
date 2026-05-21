@@ -52,7 +52,8 @@ fun analysiere(quelle: String): AnalyseErgebnis {
         Parallelplan(emptyMap())
     } else {
         Parallelanalyse(
-            programm, symbole, typpruefer.bezeichnerTypen, typpruefer.binärTypen,
+            programm, symbole, typpruefer.bezeichnerTypen,
+            typpruefer.binärTypen, typpruefer.bindungsTypen,
         ).analysiere()
     }
     return AnalyseErgebnis(programm, symbole, parallelplan, diagnosen.diagnosen)
@@ -149,12 +150,29 @@ private fun befehlPrüfe(argumente: Array<String>) {
                 println("  [${schleife.position}] Reduktion ueber $akkus")
             }
         }
+        if (plan != null && plan.streuAnzahl > 0) {
+            println()
+            val wort = if (plan.streuAnzahl == 1) "Streuschleife" else "Streuschleifen"
+            println("${plan.streuAnzahl} $wort werden automatisch parallelisiert:")
+            for ((schleife, streuung) in plan.streuungen) {
+                println("  [${schleife.position}] parallel map -> ${streuung.zielListen.joinToString(", ")}")
+            }
+        }
         if (plan != null && plan.gabelAnzahl > 0) {
             println()
             val wort = if (plan.gabelAnzahl == 1) "Ausdruck" else "Ausdruecke"
             println("${plan.gabelAnzahl} unabhaengige(r) $wort werden per fork/join parallelisiert:")
             for (ausdruck in plan.gabeln.keys) {
                 println("  [${ausdruck.position}] unabhaengige Operanden")
+            }
+        }
+        if (plan != null && plan.gruppenAnzahl > 0) {
+            println()
+            val wort = if (plan.gruppenAnzahl == 1) "sei-Gruppe" else "sei-Gruppen"
+            println("${plan.gruppenAnzahl} unabhaengige $wort werden nebenlaeufig berechnet:")
+            for (gruppe in plan.gruppen.values) {
+                val namen = gruppe.bindungen.joinToString(", ") { it.anweisung.name }
+                println("  [${gruppe.bindungen.first().anweisung.position}] $namen")
             }
         }
     } else {

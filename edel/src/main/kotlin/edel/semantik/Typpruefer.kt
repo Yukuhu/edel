@@ -38,6 +38,9 @@ class Typpruefer(
     /** Ergebnistyp jedes binaeren Ausdrucks; von der Parallelanalyse genutzt. */
     val binärTypen = HashMap<BinärAusdruck, Typ>()
 
+    /** Typ jeder `sei`-/`ver`-Bindung; von der Parallelanalyse genutzt. */
+    val bindungsTypen = HashMap<SeiAnweisung, Typ>()
+
     fun prüfe() {
         for (d in programm.deklarationen) {
             when (d) {
@@ -146,6 +149,7 @@ class Typpruefer(
                     }
                     else -> annotation
                 }
+                bindungsTypen[anweisung] = typ
                 bereich.definiere(anweisung.name, typ, anweisung.wandelbar)
             }
 

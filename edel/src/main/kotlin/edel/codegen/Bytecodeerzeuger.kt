@@ -58,6 +58,9 @@ class Bytecodeerzeuger(
     // Gabelbare binaere Ganzzahl-Ausdruecke, je mit Index fuer die `gabel$n`-Methode.
     private var gabelIndizes: Map<BinärAusdruck, Int> = emptyMap()
 
+    // Bindungen nebenlaeufiger `sei`-Gruppen, je mit Index fuer ihre `gruppe$n`-Methode.
+    private var gruppenMethoden: Map<SeiAnweisung, Int> = emptyMap()
+
     // ---- Einstieg -----------------------------------------------------------
 
     fun kompiliere(): ByteArray {
@@ -94,6 +97,20 @@ class Bytecodeerzeuger(
             }
         }
         gabelIndizes = gabeln
+
+        // Nebenlaeufige 'sei'-Gruppen erfassen (alle Bindungen Ganzzahl, nicht trivial).
+        val gruppenBindungen = ArrayList<Pair<GruppenBindung, Int>>()
+        val gruppenIndex = HashMap<SeiAnweisung, Int>()
+        for (gruppe in parallelplan.gruppen.values) {
+            if (gruppe.bindungen.all { it.typ == GanzzahlTyp && it.nichtTrivial }) {
+                for (idx in 0 until gruppe.bindungen.size - 1) { // letzte Bindung inline
+                    val nummer = gruppenBindungen.size
+                    gruppenIndex[gruppe.bindungen[idx].anweisung] = nummer
+                    gruppenBindungen.add(gruppe.bindungen[idx] to nummer)
+                }
+            }
+        }
+        gruppenMethoden = gruppenIndex
 
         return ClassFile.of().build(selbst) { clb ->
             clb.withFlags(ClassFile.ACC_PUBLIC or ClassFile.ACC_FINAL)
@@ -155,24 +172,48 @@ class Bytecodeerzeuger(
                     ClassFile.ACC_PRIVATE or ClassFile.ACC_STATIC,
                 ) { code ->
                     cob = code
-                    erzeugeGabel(ausdruck, gabel)
+                    erzeugeLieferant(ausdruck.links, gabel.linkeGefangene, ausdruck.position)
+                }
+            }
+            // Je eine 'gruppe'-Methode pro nebenlaeufiger 'sei'-Bindung.
+            for ((bindung, index) in gruppenBindungen) {
+                val parameter = bindung.gefangene.map {
+                    classDesc(artVon(it.typ, bindung.anweisung.position))
+                }
+                clb.withMethodBody(
+                    "gruppe$$index",
+                    MethodTypeDesc.of(ConstantDescs.CD_long, parameter),
+                    ClassFile.ACC_PRIVATE or ClassFile.ACC_STATIC,
+                ) { code ->
+                    cob = code
+                    erzeugeLieferant(
+                        bindung.anweisung.initialwert, bindung.gefangene, bindung.anweisung.position,
+                    )
                 }
             }
         }
     }
 
     /** Erzeugt eine `gabel$n`-Methode: berechnet den linken Operanden einer Gabelung. */
-    private fun erzeugeGabel(ausdruck: BinärAusdruck, gabel: Gabel) {
+    /**
+     * Erzeugt eine Lieferant-Methode: berechnet [ausdruck] (Typ Ganzzahl) aus
+     * den gefangenen Variablen. Basis fuer `gabel$n`- und `gruppe$n`-Methoden.
+     */
+    private fun erzeugeLieferant(
+        ausdruck: Ausdruck,
+        gefangene: List<GefangeneVariable>,
+        position: Position,
+    ) {
         nächsterSlot = 0
         bereiche.clear()
         schleifen.clear()
         bereiche.addLast(HashMap())
         rückgabeTyp = GanzzahlTyp
-        for (gefangen in gabel.linkeGefangene) {
-            val art = artVon(gefangen.typ, ausdruck.position)
+        for (gefangen in gefangene) {
+            val art = artVon(gefangen.typ, position)
             bereiche.last()[gefangen.name] = Variable(gefangen.typ, art, belegeSlot(art))
         }
-        erzeugeMitArt(ausdruck.links, Art.GANZ)
+        erzeugeMitArt(ausdruck, Art.GANZ)
         cob.lreturn()
     }
 
@@ -202,7 +243,7 @@ class Bytecodeerzeuger(
                 ?: ablehnen("Variable '${gefangen.name}' nicht gefunden", ausdruck.position)
             lade(variable.art, variable.slot)
         }
-        cob.invokedynamic(lieferantAufrufstelle(index, gefangenDescs))
+        cob.invokedynamic(lieferantAufrufstelle("gabel$$index", gefangenDescs))
         cob.invokestatic(
             CD_CompletableFuture, "supplyAsync",
             MethodTypeDesc.of(CD_CompletableFuture, CD_Supplier),
@@ -238,10 +279,13 @@ class Bytecodeerzeuger(
         }
     }
 
-    private fun lieferantAufrufstelle(index: Int, gefangenDescs: List<ClassDesc>): DynamicCallSiteDesc {
+    private fun lieferantAufrufstelle(
+        methodenname: String,
+        gefangenDescs: List<ClassDesc>,
+    ): DynamicCallSiteDesc {
         val implTyp = MethodTypeDesc.of(ConstantDescs.CD_long, gefangenDescs)
         val impl = MethodHandleDesc.ofMethod(
-            DirectMethodHandleDesc.Kind.STATIC, selbst, "gabel$$index", implTyp,
+            DirectMethodHandleDesc.Kind.STATIC, selbst, methodenname, implTyp,
         )
         val samTyp = MethodTypeDesc.of(ConstantDescs.CD_Object)
         val instanzTyp = MethodTypeDesc.of(CD_Long)
@@ -372,11 +416,89 @@ class Bytecodeerzeuger(
 
     private fun erzeugeBlock(block: Block) {
         bereiche.addLast(HashMap())
-        for (anweisung in block.anweisungen) {
-            erzeugeAnweisung(anweisung)
-            if (terminiert(anweisung)) break
+        val anweisungen = block.anweisungen
+        var i = 0
+        while (i < anweisungen.size) {
+            val gruppe = bytecodeGruppe(anweisungen[i])
+            if (gruppe != null) {
+                erzeugeParalleleGruppe(gruppe)
+                i += gruppe.bindungen.size
+            } else {
+                erzeugeAnweisung(anweisungen[i])
+                if (terminiert(anweisungen[i])) break
+                i++
+            }
         }
         bereiche.removeLast()
+    }
+
+    /** Liefert die `sei`-Gruppe ab [anweisung], falls sie im Bytecode parallelisierbar ist. */
+    private fun bytecodeGruppe(anweisung: Anweisung): Gruppe? {
+        val gruppe = parallelplan.gruppeAb(anweisung) ?: return null
+        return if (gruppe.bindungen.all { it.typ == GanzzahlTyp && it.nichtTrivial }) gruppe else null
+    }
+
+    /**
+     * Erzeugt eine nebenlaeufige `sei`-Gruppe: alle Anfangswerte bis auf den
+     * letzten werden als `CompletableFuture` im Fork-Join-Pool berechnet, der
+     * letzte im aktuellen Thread. Eine Granularitaetsschranke begrenzt den Aufwand.
+     */
+    private fun erzeugeParalleleGruppe(gruppe: Gruppe) {
+        val bindungSlots = gruppe.bindungen.map { bindung ->
+            val slot = belegeSlot(Art.GANZ)
+            bereiche.last()[bindung.anweisung.name] = Variable(GanzzahlTyp, Art.GANZ, slot)
+            slot
+        }
+        val sequentiell = cob.newLabel()
+        val ende = cob.newLabel()
+        cob.invokestatic(
+            CD_ForkJoinTask, "getSurplusQueuedTaskCount", MethodTypeDesc.of(ConstantDescs.CD_int),
+        )
+        cob.loadConstant(3)
+        cob.if_icmpgt(sequentiell)
+
+        // Parallel: alle Bindungen bis auf die letzte als CompletableFuture.
+        val futureSlots = ArrayList<Int>()
+        for (idx in 0 until gruppe.bindungen.size - 1) {
+            val bindung = gruppe.bindungen[idx]
+            val gefangenDescs = bindung.gefangene.map {
+                classDesc(artVon(it.typ, bindung.anweisung.position))
+            }
+            for (gefangen in bindung.gefangene) {
+                val variable = findeVariable(gefangen.name)
+                    ?: ablehnen("Variable '${gefangen.name}' nicht gefunden", bindung.anweisung.position)
+                lade(variable.art, variable.slot)
+            }
+            val name = "gruppe$${gruppenMethoden.getValue(bindung.anweisung)}"
+            cob.invokedynamic(lieferantAufrufstelle(name, gefangenDescs))
+            cob.invokestatic(
+                CD_CompletableFuture, "supplyAsync",
+                MethodTypeDesc.of(CD_CompletableFuture, CD_Supplier),
+            )
+            val futureSlot = belegeSlot(Art.TEXT)
+            cob.astore(futureSlot)
+            futureSlots.add(futureSlot)
+        }
+        // Letzte Bindung im aktuellen Thread berechnen.
+        erzeugeMitArt(gruppe.bindungen.last().anweisung.initialwert, Art.GANZ)
+        cob.lstore(bindungSlots.last())
+        // Ergebnisse der Futures einsammeln.
+        for (idx in 0 until gruppe.bindungen.size - 1) {
+            cob.aload(futureSlots[idx])
+            cob.invokevirtual(CD_CompletableFuture, "join", MethodTypeDesc.of(ConstantDescs.CD_Object))
+            cob.checkcast(CD_Long)
+            cob.invokevirtual(CD_Long, "longValue", MethodTypeDesc.of(ConstantDescs.CD_long))
+            cob.lstore(bindungSlots[idx])
+        }
+        cob.goto_(ende)
+
+        // Sequentiell.
+        cob.labelBinding(sequentiell)
+        for (idx in gruppe.bindungen.indices) {
+            erzeugeMitArt(gruppe.bindungen[idx].anweisung.initialwert, Art.GANZ)
+            cob.lstore(bindungSlots[idx])
+        }
+        cob.labelBinding(ende)
     }
 
     private fun erzeugeAnweisung(anweisung: Anweisung) {

@@ -93,6 +93,14 @@ class CodegenTest {
     }
 
     @Test
+    fun uebersetztNebenlaeufigeSeiGruppe() {
+        // sei a/b/c werden je per CompletableFuture nebenlaeufig berechnet.
+        val quelle = "funktion f(n: Ganzzahl): Ganzzahl { zurück n * n }\n" +
+            "funktion start() { sei a = f(10) sei b = f(20) sei c = f(30) drucke(a + b + c) }"
+        assertEquals("1400\n", kompiliereUndLaufe("ProbeSeiGruppe", quelle))
+    }
+
+    @Test
     fun lehntNichtUnterstuetzteProgrammeAb() {
         val quelle = "datensatz Punkt(x: Ganzzahl, y: Ganzzahl)\nfunktion start() { }"
         val ergebnis = analysiere(quelle)

@@ -20,15 +20,41 @@ class Reduktion(val akkumulatoren: List<Akkumulator>, val gefangene: List<Gefang
  */
 class Gabel(val linkeGefangene: List<GefangeneVariable>, val ergebnistyp: Typ)
 
-/** Ergebnis der Parallelanalyse: parallelisierbare Schleifen und Gabelungen. */
+/**
+ * Eine Streuung ("parallel map"): eine `für von bis`-Schleife, die nur in
+ * disjunkte Listenelemente am Schleifenindex schreibt — `K.setze(i, …)`.
+ */
+class Streuung(val zielListen: List<String>)
+
+/** Eine Bindung innerhalb einer parallelen `sei`-Gruppe. */
+class GruppenBindung(
+    val anweisung: SeiAnweisung,
+    val gefangene: List<GefangeneVariable>,
+    val typ: Typ,
+    val nichtTrivial: Boolean,
+)
+
+/**
+ * Eine Gruppe aufeinanderfolgender, voneinander unabhaengiger reiner
+ * `sei`-Bindungen, deren Anfangswerte nebenlaeufig berechnet werden koennen.
+ */
+class Gruppe(val bindungen: List<GruppenBindung>)
+
+/** Ergebnis der Parallelanalyse: alle automatisch parallelisierbaren Stellen. */
 class Parallelplan(
     val reduktionen: Map<Anweisung, Reduktion>,
     val gabeln: Map<BinärAusdruck, Gabel> = emptyMap(),
+    val streuungen: Map<Anweisung, Streuung> = emptyMap(),
+    val gruppen: Map<SeiAnweisung, Gruppe> = emptyMap(),
 ) {
     val anzahl: Int get() = reduktionen.size
     val gabelAnzahl: Int get() = gabeln.size
+    val streuAnzahl: Int get() = streuungen.size
+    val gruppenAnzahl: Int get() = gruppen.size
     fun reduktionVon(schleife: Anweisung): Reduktion? = reduktionen[schleife]
     fun gabelVon(ausdruck: BinärAusdruck): Gabel? = gabeln[ausdruck]
+    fun streuungVon(schleife: Anweisung): Streuung? = streuungen[schleife]
+    fun gruppeAb(anweisung: Anweisung): Gruppe? = gruppen[anweisung]
 }
 
 /**
@@ -46,19 +72,23 @@ class Parallelanalyse(
     private val symbole: GlobaleSymbole,
     private val bezeichnerTypen: Map<Bezeichner, Typ>,
     private val binärTypen: Map<BinärAusdruck, Typ> = emptyMap(),
+    private val bindungsTypen: Map<SeiAnweisung, Typ> = emptyMap(),
 ) {
     private val reineFunktionen: Set<String> by lazy { berechneReinheit() }
 
     fun analysiere(): Parallelplan {
         val reduktionen = LinkedHashMap<Anweisung, Reduktion>() // Quelltextreihenfolge
         val gabeln = LinkedHashMap<BinärAusdruck, Gabel>()
+        val streuungen = LinkedHashMap<Anweisung, Streuung>()
+        val gruppen = LinkedHashMap<SeiAnweisung, Gruppe>()
         for (deklaration in programm.deklarationen) {
             if (deklaration is FunktionDeklaration) {
-                sucheSchleifen(deklaration.körper, reduktionen)
+                sucheSchleifen(deklaration.körper, reduktionen, streuungen)
                 sucheGabeln(deklaration.körper, gabeln)
+                sucheGruppen(deklaration.körper, gruppen)
             }
         }
-        return Parallelplan(reduktionen, gabeln)
+        return Parallelplan(reduktionen, gabeln, streuungen, gruppen)
     }
 
     // ---- Gabelungen (unabhaengige reine Teilausdruecke) ---------------------
@@ -118,17 +148,153 @@ class Parallelanalyse(
         return ergebnis.map { GefangeneVariable(it.key, it.value) }
     }
 
+    /** Namen aller in [ausdruck] gelesenen Variablen (ohne Funktionen). */
+    private fun freieNamen(ausdruck: Ausdruck): Set<String> =
+        alleTeilausdrücke(ausdruck)
+            .filterIsInstance<Bezeichner>()
+            .map { it.name }
+            .filterTo(HashSet()) { it !in symbole.funktionen && it !in Resolver.EINGEBAUTE_NAMEN }
+
+    // ---- Unabhaengige 'sei'-Gruppen -----------------------------------------
+
+    private fun sucheGruppen(körper: Block, ziel: MutableMap<SeiAnweisung, Gruppe>) {
+        for (anweisung in alleAnweisungen(körper)) {
+            if (anweisung is Block) gruppenImBlock(anweisung.anweisungen, ziel)
+        }
+    }
+
+    /**
+     * Findet maximale Folgen aufeinanderfolgender reiner `sei`-Bindungen, deren
+     * Anfangswerte sich nicht gegenseitig referenzieren. Eine Gruppe wird
+     * registriert, sobald sie mindestens zwei nicht triviale Bindungen enthaelt.
+     */
+    private fun gruppenImBlock(anweisungen: List<Anweisung>, ziel: MutableMap<SeiAnweisung, Gruppe>) {
+        var gruppe = mutableListOf<SeiAnweisung>()
+        val gebundene = HashSet<String>()
+
+        fun abschliessen() {
+            if (gruppe.size >= 2 && gruppe.count { enthältAufruf(it.initialwert) } >= 2) {
+                ziel[gruppe.first()] = Gruppe(
+                    gruppe.map { sei ->
+                        GruppenBindung(
+                            sei,
+                            gefangeneVon(sei.initialwert),
+                            bindungsTypen[sei] ?: FehlerTyp,
+                            enthältAufruf(sei.initialwert),
+                        )
+                    },
+                )
+            }
+            gruppe = mutableListOf()
+            gebundene.clear()
+        }
+
+        fun versucheAufnahme(anweisung: Anweisung): Boolean {
+            if (anweisung !is SeiAnweisung) return false
+            if (!istReinerAusdruck(anweisung.initialwert)) return false
+            if (freieNamen(anweisung.initialwert).any { it in gebundene }) return false
+            gruppe.add(anweisung)
+            gebundene.add(anweisung.name)
+            return true
+        }
+
+        for (anweisung in anweisungen) {
+            if (!versucheAufnahme(anweisung)) {
+                abschliessen()
+                versucheAufnahme(anweisung) // darf eine neue Gruppe beginnen
+            }
+        }
+        abschliessen()
+    }
+
     // ---- Schleifensuche -----------------------------------------------------
 
-    private fun sucheSchleifen(anweisung: Anweisung, ergebnis: MutableMap<Anweisung, Reduktion>) {
+    private fun sucheSchleifen(
+        anweisung: Anweisung,
+        reduktionen: MutableMap<Anweisung, Reduktion>,
+        streuungen: MutableMap<Anweisung, Streuung>,
+    ) {
         if (anweisung is FürVonBisAnweisung || anweisung is FürInAnweisung) {
             val reduktion = alsReduktion(anweisung)
             if (reduktion != null) {
-                ergebnis[anweisung] = reduktion
+                reduktionen[anweisung] = reduktion
                 return // verschachtelte Schleifen laufen innerhalb sequentiell
             }
+            if (anweisung is FürVonBisAnweisung) {
+                val streuung = alsStreuung(anweisung)
+                if (streuung != null) {
+                    streuungen[anweisung] = streuung
+                    return
+                }
+            }
         }
-        for (unter in unterAnweisungen(anweisung)) sucheSchleifen(unter, ergebnis)
+        for (unter in unterAnweisungen(anweisung)) {
+            sucheSchleifen(unter, reduktionen, streuungen)
+        }
+    }
+
+    // ---- Streuungen (parallel map: disjunkte Listenelemente) ----------------
+
+    /**
+     * Erkennt eine Streuschleife: jede Anweisung des Rumpfes ist entweder eine
+     * lokale `sei`-Bindung oder ein Schreibzugriff `K.setze(i, …)` bzw.
+     * `K[i] = …` auf eine aeussere Liste am Schleifenindex `i`. Da jede Iteration
+     * ein anderes Element schreibt, sind die Iterationen unabhaengig.
+     */
+    private fun alsStreuung(schleife: FürVonBisAnweisung): Streuung? {
+        val körper = schleife.körper
+        val loopVar = schleife.variable
+        val lokale = HashSet<String>()
+        lokale.add(loopVar)
+        sammleLokaleNamen(körper, lokale)
+
+        val ziele = LinkedHashSet<String>()
+        val ausnahmen = java.util.Collections.newSetFromMap(IdentityHashMap<Ausdruck, Boolean>())
+
+        // Rumpf darf nur lokale 'sei' und Streuschreibzugriffe enthalten.
+        for (anweisung in körper.anweisungen) {
+            when (anweisung) {
+                is SeiAnweisung -> {} // lokale Bindung; Ausdruck wird unten geprueft
+                is ZuweisungAnweisung -> {
+                    val ziel = anweisung.ziel as? IndexAusdruck ?: return null
+                    val liste = ziel.ziel as? Bezeichner ?: return null
+                    val index = ziel.index as? Bezeichner ?: return null
+                    if (liste.name in lokale || index.name != loopVar) return null
+                    ziele.add(liste.name)
+                    ausnahmen.add(ziel)
+                    ausnahmen.add(liste)
+                }
+                is AusdruckAnweisung -> {
+                    val ruf = anweisung.ausdruck as? AufrufAusdruck ?: return null
+                    val feld = ruf.ziel as? FeldzugriffAusdruck ?: return null
+                    val liste = feld.ziel as? Bezeichner ?: return null
+                    val index = ruf.argumente.getOrNull(0) as? Bezeichner
+                    if (feld.feld != "setze" || ruf.argumente.size != 2) return null
+                    if (liste.name in lokale || index?.name != loopVar) return null
+                    ziele.add(liste.name)
+                    ausnahmen.add(ruf)
+                    ausnahmen.add(feld)
+                    ausnahmen.add(liste)
+                }
+                else -> return null // kein wenn/verschachtelte Schleifen im Streurumpf (v1)
+            }
+        }
+        if (ziele.isEmpty()) return null
+
+        // Ziel-Listen muessen Listen sein und duerfen nicht gelesen werden.
+        for (name in ziele) {
+            if (typVonName(körper, name) !is ListeTyp) return null
+        }
+        for (anweisung in alleAnweisungen(körper)) {
+            for (ausdruck in direkteAusdrücke(anweisung)) {
+                for (teil in alleTeilausdrücke(ausdruck)) {
+                    if (teil is LambdaAusdruck) return null
+                    if (teil is AufrufAusdruck && teil !in ausnahmen && aufrufVerletzt(teil)) return null
+                    if (teil is Bezeichner && teil.name in ziele && teil !in ausnahmen) return null
+                }
+            }
+        }
+        return Streuung(ziele.toList())
     }
 
     private fun alsReduktion(schleife: Anweisung): Reduktion? {

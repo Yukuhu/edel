@@ -1,0 +1,33 @@
+// Weitere automatisch erkannte Parallelmuster.
+//
+//  - Streuung ("parallel map"): jede Iteration schreibt ein eigenes,
+//    disjunktes Listenelement -> die Iterationen sind unabhängig.
+//  - Unabhängige sei-Gruppe: aufeinanderfolgende reine Bindungen, deren
+//    Anfangswerte sich nicht referenzieren, werden nebenläufig berechnet.
+
+funktion quadrat(n: Ganzzahl): Ganzzahl {
+    zurück n * n
+}
+
+funktion dreieckszahl(n: Ganzzahl): Ganzzahl {
+    ver s = 0
+    für k von 1 bis n {
+        s = s + k
+    }
+    zurück s
+}
+
+funktion start() {
+    // Streuung: quadrate[i] = i*i, jede Iteration ein eigenes Element.
+    ver quadrate = Liste(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    für i von 0 bis 9 {
+        quadrate.setze(i, quadrat(i))
+    }
+    drucke(quadrate)
+
+    // Unabhängige sei-Gruppe: a, b, c werden nebenläufig berechnet.
+    sei a = dreieckszahl(1000)
+    sei b = dreieckszahl(2000)
+    sei c = dreieckszahl(3000)
+    drucke("Summe = " + (a + b + c))
+}

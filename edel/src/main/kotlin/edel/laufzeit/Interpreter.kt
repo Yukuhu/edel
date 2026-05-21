@@ -4,6 +4,7 @@ import edel.fehler.LaufzeitFehler
 import edel.lexer.TokenTyp
 import edel.lexer.TokenTyp.*
 import edel.parser.*
+import edel.semantik.Gruppe
 import edel.semantik.Parallelplan
 import edel.semantik.Reduktion
 import java.util.concurrent.Callable
@@ -150,11 +151,14 @@ class Interpreter(
                 val von = (evaluiere(anweisung.von, umgebung) as GanzzahlWert).wert
                 val bis = (evaluiere(anweisung.bis, umgebung) as GanzzahlWert).wert
                 val reduktion = parallelplan.reduktionVon(anweisung)
+                val streuung = parallelplan.streuungVon(anweisung)
                 if (reduktion != null && darfParallel(bis - von + 1)) {
                     führeParalleleReduktion(
                         reduktion, anweisung.variable, anweisung.körper, umgebung,
                         bis - von + 1,
                     ) { k -> GanzzahlWert(von + k) }
+                } else if (streuung != null && darfParallel(bis - von + 1)) {
+                    führeParallelerStreuung(anweisung, von, bis, umgebung)
                 } else {
                     var i = von
                     while (i <= bis) {
@@ -182,7 +186,18 @@ class Interpreter(
     }
 
     private fun führeBlockAus(block: Block, umgebung: Umgebung) {
-        for (anweisung in block.anweisungen) führeAnweisungAus(anweisung, umgebung)
+        val anweisungen = block.anweisungen
+        var i = 0
+        while (i < anweisungen.size) {
+            val gruppe = parallelplan.gruppeAb(anweisungen[i])
+            if (gruppe != null && darfGabeln()) {
+                führeParalleleGruppe(gruppe, umgebung)
+                i += gruppe.bindungen.size
+            } else {
+                führeAnweisungAus(anweisungen[i], umgebung)
+                i++
+            }
+        }
     }
 
     // ---- Automatische Parallelisierung -------------------------------------
@@ -210,6 +225,54 @@ class Interpreter(
         val aufgabe = ForkJoinTask.adapt(Callable { evaluiere(links, umgebung) }).fork()
         val rechtsWert = evaluiere(rechts, umgebung)
         return aufgabe.join() to rechtsWert
+    }
+
+    /**
+     * Fuehrt eine Streuschleife nebenlaeufig aus: die Iterationen werden
+     * verschraenkt auf Threads verteilt. Jede schreibt nur in disjunkte
+     * Listenelemente, daher ist kein Zusammenfuehren noetig.
+     */
+    private fun führeParallelerStreuung(
+        anweisung: FürVonBisAnweisung,
+        von: Long,
+        bis: Long,
+        umgebung: Umgebung,
+    ) {
+        val anzahl = bis - von + 1
+        val chunks = minOf(Runtime.getRuntime().availableProcessors().toLong(), anzahl).toInt()
+        val fehler = arrayOfNulls<Throwable>(chunks)
+        val threads = (0 until chunks).map { k ->
+            Thread {
+                try {
+                    inParalleler.set(true)
+                    var i = von + k
+                    while (i <= bis) {
+                        val schleifenUmgebung = Umgebung(umgebung)
+                        schleifenUmgebung.definiere(anweisung.variable, GanzzahlWert(i))
+                        führeBlockAus(anweisung.körper, schleifenUmgebung)
+                        i += chunks
+                    }
+                } catch (t: Throwable) {
+                    fehler[k] = t
+                }
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+        fehler.firstOrNull { it != null }?.let { throw it }
+    }
+
+    /** Berechnet die Anfangswerte einer unabhaengigen `sei`-Gruppe nebenlaeufig. */
+    private fun führeParalleleGruppe(gruppe: Gruppe, umgebung: Umgebung) {
+        val initialwerte = gruppe.bindungen.map { it.anweisung.initialwert }
+        val aufgaben = initialwerte.dropLast(1).map { initialwert ->
+            ForkJoinTask.adapt(Callable { evaluiere(initialwert, umgebung) }).fork()
+        }
+        val letzterWert = evaluiere(initialwerte.last(), umgebung)
+        gruppe.bindungen.forEachIndexed { index, bindung ->
+            val wert = if (index < aufgaben.size) aufgaben[index].join() else letzterWert
+            umgebung.definiere(bindung.anweisung.name, wert)
+        }
     }
 
     /**

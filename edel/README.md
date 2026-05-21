@@ -184,15 +184,36 @@ die oberen Rekursionsebenen forken und der Mehraufwand beschränkt bleibt.
 *Parallelität beschleunigt um einen festen Faktor (×Kerne) — sie ersetzt keinen
 besseren Algorithmus; naives `fib` bleibt exponentiell.*
 
-Beides wirkt in **allen Ausführungsarten**: im Interpreter (`starte`), im
-JVM-Bytecode (`übersetze`) und im nativen Programm (`binär`) — im Bytecode
-entstehen daraus ein paralleler `LongStream` bzw. `CompletableFuture`-Aufgaben.
+**Parallel map (Streuung).** Eine `für von bis`-Schleife, die jede Iteration in
+ein eigenes Listenelement am Schleifenindex schreibt, ist eine Streuung — die
+Iterationen berühren disjunkte Elemente und sind daher unabhängig:
+
+```
+für i von 0 bis n {
+    ergebnis.setze(i, teuer(i))   // Index i je Iteration eindeutig
+}
+```
+
+**Unabhängige `sei`-Gruppen.** Aufeinanderfolgende reine `sei`-Bindungen, deren
+Anfangswerte sich nicht gegenseitig referenzieren, werden nebenläufig berechnet
+— die idiomatische Form für divide-and-conquer:
+
+```
+sei links  = sortiere(linkeHälfte)    // unabhängig -> parallel
+sei rechts = sortiere(rechteHälfte)
+```
+
+Reduktionen, Gabelungen und `sei`-Gruppen wirken in **allen Ausführungsarten**
+(`starte`, `übersetze`, `binär`) — im Bytecode entstehen daraus ein paralleler
+`LongStream` bzw. `CompletableFuture`-Aufgaben. Streuschleifen parallelisiert
+der Interpreter (das Bytecode-Backend kennt noch keine Listen).
 
 *Edel auto-parallelizes provably-independent work with no keyword and no thread
-code: reduction loops (associative `+`/`*` accumulation) and independent pure
-subexpressions such as the two recursive calls in `fib(n-1) + fib(n-2)`
-(fork/join, with a granularity cutoff). Results are bit-identical to sequential
-execution, in the interpreter, the JVM bytecode, and the native binary alike.*
+code: reduction loops (associative `+`/`*` accumulation), independent pure
+subexpressions like `fib(n-1) + fib(n-2)` (fork/join), parallel-map "scatter"
+loops (each iteration writes a distinct list element), and independent `sei`
+groups (concurrent bindings — the natural form for divide-and-conquer). Results
+are bit-identical to sequential, in interpreter, bytecode and native alike.*
 
 ## Bytecode-Backend / Bytecode back-end
 
