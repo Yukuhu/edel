@@ -443,7 +443,9 @@ class Interpreter(
         }
 
         is FeldzugriffAusdruck -> {
-            when (val basis = evaluiere(ausdruck.ziel, umgebung)) {
+            val basis = evaluiere(ausdruck.ziel, umgebung)
+            if (ausdruck.sicher && basis is NichtsWert) NichtsWert
+            else when (basis) {
                 is AufzählungstypWert -> {
                     if (ausdruck.feld !in basis.varianten) {
                         throw LaufzeitFehler("'${basis.typname}' hat keine Variante '${ausdruck.feld}'")
@@ -485,6 +487,17 @@ class Interpreter(
             if (treffer != null) evaluiere(treffer.ergebnis, umgebung)
             else evaluiere(ausdruck.sonst, umgebung)
         }
+
+        is ElvisAusdruck -> {
+            val links = evaluiere(ausdruck.links, umgebung)
+            if (links is NichtsWert) evaluiere(ausdruck.rechts, umgebung) else links
+        }
+
+        is NichtNullAusdruck -> {
+            val wert = evaluiere(ausdruck.operand, umgebung)
+            if (wert is NichtsWert) throw LaufzeitFehler("Wert ist 'nichts'")
+            wert
+        }
     }
 
     // ---- Aufrufe ------------------------------------------------------------
@@ -494,6 +507,7 @@ class Interpreter(
         val ziel = ausdruck.ziel
         if (ziel is FeldzugriffAusdruck) {
             val basis = evaluiere(ziel.ziel, umgebung)
+            if (ziel.sicher && basis is NichtsWert) return NichtsWert
             return methodenaufruf(basis, ziel.feld, argumente)
         }
         return rufeAuf(evaluiere(ziel, umgebung), argumente)

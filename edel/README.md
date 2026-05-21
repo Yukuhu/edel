@@ -127,6 +127,43 @@ drucke(noten.holen("Anna"))
 Eingebaute Funktionen: `drucke` (ausgeben), `lies` (Zeile einlesen),
 `länge` (Länge von Text/Liste/Abbildung).
 
+### Nullsicherheit / Null safety
+
+Edel ist **nullsicher nach Kotlin-Vorbild**: Typen sind standardmäßig
+*nicht-nullbar*. Nur ein nullbarer Typ `T?` darf den Wert `nichts` annehmen, und
+der Compiler verhindert, dass ein möglicherweise-`nichts`-Wert unsicher
+verwendet wird.
+
+```
+sei name: Text  = "Edel"     // nie nichts
+sei rest: Text? = nichts     // darf nichts sein
+drucke(rest.länge())          // FEHLER: rest kann nichts sein
+```
+
+Drei Operatoren — wie in Kotlin — entschärfen einen nullbaren Wert:
+
+```
+rest?.länge()        // sicherer Aufruf  -> Ganzzahl?  (nichts, falls rest nichts ist)
+rest ?: "leer"       // Elvis            -> Ersatzwert, falls rest nichts ist
+rest!!               // Nicht-null-Zusicherung — wirft zur Laufzeit, falls nichts
+```
+
+**Smart Cast.** Nach einer Nullprüfung gilt eine stabile Variable (`sei` oder
+Parameter) im betreffenden Zweig als nicht-nullbar — auch in `und`-Ketten und
+nach einer abbrechenden Frühprüfung:
+
+```
+wenn name != nichts und name.länge() > 0 { ... }   // name rechts nicht-nullbar
+wenn x == nichts { zurück }                         // danach ist x nicht-nullbar
+```
+
+*Types are non-nullable by default; `T?` is the nullable form. `?.`, `?:` and
+`!!` work as in Kotlin, and the type checker smart-casts a stable variable to
+non-null after a null check (including inside `und`-chains and after an
+early-return guard). Nullable primitives compile to boxed JVM types
+(`Ganzzahl?`→`Long`), so null safety holds in the interpreter, the bytecode and
+the native binary alike.*
+
 ### Schlüsselwörter / Keywords
 
 `sei ver funktion zurück wenn sonst solange für in von bis brich weiter

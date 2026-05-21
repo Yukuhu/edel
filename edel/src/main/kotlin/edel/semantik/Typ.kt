@@ -100,11 +100,36 @@ class SchnittstellenTyp(val name: String) : Typ() {
 
 // ---- Typbeziehungen ---------------------------------------------------------
 
+/** Ein nullbarer Typ `Basis?`: kann zusaetzlich den Wert `nichts` annehmen. */
+class NullbarTyp(val basis: Typ) : Typ() {
+    override fun anzeige() = "${basis.anzeige()}?"
+    override fun equals(other: Any?) = other is NullbarTyp && other.basis == basis
+    override fun hashCode() = 31 * basis.hashCode() + 7
+}
+
 fun istNumerisch(typ: Typ): Boolean = typ == GanzzahlTyp || typ == KommazahlTyp
+
+/** Macht einen Typ nullbar (idempotent; `Nichts`/`<Fehler>` bleiben unveraendert). */
+fun nullbar(typ: Typ): Typ = when (typ) {
+    is NullbarTyp, NichtsTyp, FehlerTyp -> typ
+    else -> NullbarTyp(typ)
+}
+
+/** Entfernt die Nullbarkeit und liefert den Basistyp. */
+fun entnullt(typ: Typ): Typ = if (typ is NullbarTyp) typ.basis else typ
+
+/** Kann der Typ den Wert `nichts` annehmen? */
+fun istNullbar(typ: Typ): Boolean = typ is NullbarTyp || typ == NichtsTyp
 
 /** Ist ein Wert vom Typ [quelle] einem Ziel vom Typ [ziel] zuweisbar? */
 fun istZuweisbar(ziel: Typ, quelle: Typ): Boolean {
     if (ziel == FehlerTyp || quelle == FehlerTyp) return true
+    // 'nichts' passt nur in nullbare Typen (und in Nichts selbst).
+    if (quelle == NichtsTyp) return ziel is NullbarTyp || ziel == NichtsTyp
+    // Nullbares Ziel akzeptiert nullbare wie nicht-nullbare Quellen.
+    if (ziel is NullbarTyp) return istZuweisbar(ziel.basis, entnullt(quelle))
+    // Ein nicht-nullbares Ziel akzeptiert keinen moeglicherweise-null-Wert.
+    if (quelle is NullbarTyp) return false
     if (ziel == quelle) return true
     // Numerische Erweiterung: Ganzzahl passt in Kommazahl.
     if (ziel == KommazahlTyp && quelle == GanzzahlTyp) return true
@@ -122,6 +147,17 @@ fun gemeinsamerTyp(a: Typ, b: Typ): Typ = when {
     b == FehlerTyp -> a
     istZuweisbar(a, b) -> a
     istZuweisbar(b, a) -> b
-    istNumerisch(a) && istNumerisch(b) -> KommazahlTyp
-    else -> FehlerTyp
+    else -> {
+        val basis = when {
+            entnullt(a) == entnullt(b) -> entnullt(a)
+            istNumerisch(entnullt(a)) && istNumerisch(entnullt(b)) -> KommazahlTyp
+            else -> null
+        }
+        when {
+            basis == null && istNumerisch(a) && istNumerisch(b) -> KommazahlTyp
+            basis == null -> FehlerTyp
+            istNullbar(a) || istNullbar(b) -> nullbar(basis)
+            else -> basis
+        }
+    }
 }

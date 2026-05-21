@@ -1,0 +1,24 @@
+// Nullsicherheit nach Kotlin-Vorbild.
+//
+//  - Typen sind standardmäßig nicht-nullbar; 'Text?' erlaubt zusätzlich 'nichts'.
+//  - '?.' (sicherer Aufruf), '?:' (Elvis) und '!!' (Nicht-null-Zusicherung).
+//  - Smart Cast: nach einer Nullprüfung gilt die Variable als nicht-nullbar.
+
+funktion begrüßung(name: Text?): Text {
+    wenn name == nichts {
+        zurück "Hallo, Unbekannte!"
+    }
+    // 'name' ist hier nicht-nullbar (Smart Cast nach der Nullprüfung).
+    zurück "Hallo, " + name + "!"
+}
+
+funktion start() {
+    drucke(begrüßung("Andre"))
+    drucke(begrüßung(nichts))
+
+    sei eingabe: Text? = nichts
+    drucke("Länge: " + (eingabe?.länge() ?: 0))
+
+    sei zahl: Ganzzahl? = 41
+    drucke(zahl!! + 1)
+}

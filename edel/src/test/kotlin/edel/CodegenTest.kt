@@ -101,6 +101,14 @@ class CodegenTest {
     }
 
     @Test
+    fun uebersetztNullbareGanzzahlen() {
+        // Ganzzahl? -> geboxtes Long, 'nichts' -> aconst_null, '?:' / '!!'.
+        val quelle = "funktion start() { sei x: Ganzzahl? = nichts drucke(x ?: 42) " +
+            "sei y: Ganzzahl? = 8 drucke(y!!) }"
+        assertEquals("42\n8\n", kompiliereUndLaufe("ProbeNullbar", quelle))
+    }
+
+    @Test
     fun lehntNichtUnterstuetzteProgrammeAb() {
         val quelle = "datensatz Punkt(x: Ganzzahl, y: Ganzzahl)\nfunktion start() { }"
         val ergebnis = analysiere(quelle)

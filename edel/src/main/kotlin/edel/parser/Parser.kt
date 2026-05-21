@@ -198,6 +198,15 @@ class Parser(private val tokens: List<Token>) {
     // ---- Typausdruecke ------------------------------------------------------
 
     private fun typausdruck(): Typausdruck {
+        var typ = grundTypausdruck()
+        while (prüfe(FRAGE)) {
+            val pos = tokens[i++].position
+            typ = NullbarTypausdruck(typ, pos)
+        }
+        return typ
+    }
+
+    private fun grundTypausdruck(): Typausdruck {
         if (prüfe(KLAMMER_AUF)) {
             val pos = tokens[i++].position
             val parameter = mutableListOf<Typausdruck>()
@@ -310,7 +319,17 @@ class Parser(private val tokens: List<Token>) {
 
     // ---- Ausdruecke (Praezedenzkletterung) ----------------------------------
 
-    private fun ausdruck(): Ausdruck = oder()
+    private fun ausdruck(): Ausdruck = elvis()
+
+    /** Elvis-Operator `?:`, rechtsassoziativ und schwaecher bindend als `oder`. */
+    private fun elvis(): Ausdruck {
+        val links = oder()
+        if (prüfe(ELVIS)) {
+            val pos = tokens[i++].position
+            return ElvisAusdruck(links, elvis(), pos)
+        }
+        return links
+    }
 
     private fun oder(): Ausdruck {
         var links = und()
@@ -393,6 +412,15 @@ class Parser(private val tokens: List<Token>) {
                     val pos = tokens[i++].position
                     val feld = erwarte(BEZEICHNER, "Feld- oder Methodenname").text
                     FeldzugriffAusdruck(ausdruck, feld, pos)
+                }
+                FRAGE_PUNKT -> {
+                    val pos = tokens[i++].position
+                    val feld = erwarte(BEZEICHNER, "Feld- oder Methodenname").text
+                    FeldzugriffAusdruck(ausdruck, feld, pos, sicher = true)
+                }
+                DOPPEL_AUSRUF -> {
+                    val pos = tokens[i++].position
+                    NichtNullAusdruck(ausdruck, pos)
                 }
                 else -> return ausdruck
             }

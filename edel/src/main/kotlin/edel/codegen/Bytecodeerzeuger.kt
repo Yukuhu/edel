@@ -36,7 +36,12 @@ class Bytecodeerzeuger(
     private val klassenname: String,
     private val parallelplan: Parallelplan = Parallelplan(emptyMap()),
 ) {
-    private enum class Art { GANZ, KOMMA, WAHR, ZEICH, TEXT }
+    // Nicht-nullbare Grundarten und ihre nullbaren (geboxten) Gegenstuecke.
+    private enum class Art {
+        GANZ, KOMMA, WAHR, ZEICH, TEXT,
+        N_GANZ, N_KOMMA, N_WAHR, N_ZEICH, N_TEXT,
+        NICHTS,
+    }
     private enum class Vgl { EQ, NE, LT, LE, GT, GE }
 
     private class Variable(val typ: Typ, val art: Art, val slot: Int)
@@ -727,8 +732,10 @@ class Bytecodeerzeuger(
 
             is WähleAusdruck -> erzeugeWähle(ausdruck)
 
-            is NichtsLiteral ->
-                ablehnen("'nichts' wird vom Bytecode-Backend nicht unterstuetzt", ausdruck.position)
+            is NichtsLiteral -> cob.aconst_null()
+            is ElvisAusdruck -> erzeugeElvis(ausdruck)
+            is NichtNullAusdruck -> erzeugeNichtNull(ausdruck)
+
             is DiesAusdruck ->
                 ablehnen("'dies' wird vom Bytecode-Backend nicht unterstuetzt", ausdruck.position)
             is NeuAusdruck ->
@@ -746,7 +753,16 @@ class Bytecodeerzeuger(
         when (ausdruck.operator) {
             UND -> kurzschluss(ausdruck, sprungWennWahr = false)
             ODER -> kurzschluss(ausdruck, sprungWennWahr = true)
-            GLEICH, UNGLEICH, KLEINER, KLEINER_GLEICH, GRÖSSER, GRÖSSER_GLEICH ->
+            GLEICH, UNGLEICH -> {
+                val links = typVon(ausdruck.links)
+                val rechts = typVon(ausdruck.rechts)
+                if (istNullbar(links) || istNullbar(rechts)) {
+                    erzeugeNullVergleich(ausdruck)
+                } else {
+                    erzeugeVergleich(ausdruck)
+                }
+            }
+            KLEINER, KLEINER_GLEICH, GRÖSSER, GRÖSSER_GLEICH ->
                 erzeugeVergleich(ausdruck)
             PLUS, MINUS, STERN, SCHRÄGSTRICH, PROZENT -> {
                 if (ausdruck.operator == PLUS && typVon(ausdruck) == TextTyp) {
@@ -759,6 +775,87 @@ class Bytecodeerzeuger(
             }
             else -> ablehnen("Unbekannter Operator", ausdruck.position)
         }
+    }
+
+    /** Elvis `links ?: rechts`: liefert [rechts], falls [links] `nichts` ist. */
+    private fun erzeugeElvis(ausdruck: ElvisAusdruck) {
+        val linksArt = artVon(typVon(ausdruck.links), ausdruck.links.position)
+        val ergArt = artVon(typVon(ausdruck), ausdruck.position)
+        if (!istReferenz(linksArt)) {
+            erzeugeMitArt(ausdruck.links, ergArt) // linke Seite ist nie 'nichts'
+            return
+        }
+        val sonst = cob.newLabel()
+        val ende = cob.newLabel()
+        erzeugeAusdruck(ausdruck.links)
+        cob.dup()
+        cob.ifnull(sonst)
+        koerziere(linksArt, ergArt)
+        cob.goto_(ende)
+        cob.labelBinding(sonst)
+        cob.pop()
+        erzeugeMitArt(ausdruck.rechts, ergArt)
+        cob.labelBinding(ende)
+    }
+
+    /** Nicht-null-Zusicherung `operand!!`: wirft, falls der Wert `nichts` ist. */
+    private fun erzeugeNichtNull(ausdruck: NichtNullAusdruck) {
+        val operandArt = artVon(typVon(ausdruck.operand), ausdruck.operand.position)
+        erzeugeAusdruck(ausdruck.operand)
+        if (!istReferenz(operandArt)) return // bereits nicht-nullbar
+        val ok = cob.newLabel()
+        cob.dup()
+        cob.ifnonnull(ok)
+        cob.pop()
+        cob.new_(CD_NullPointerException)
+        cob.dup()
+        ladeText("Wert ist 'nichts'")
+        cob.invokespecial(
+            CD_NullPointerException, "<init>",
+            MethodTypeDesc.of(ConstantDescs.CD_void, CD_String),
+        )
+        cob.athrow()
+        cob.labelBinding(ok)
+        koerziere(operandArt, entnullArt(operandArt))
+    }
+
+    /** Vergleich, an dem `nichts` bzw. ein nullbarer Wert beteiligt ist. */
+    private fun erzeugeNullVergleich(ausdruck: BinärAusdruck) {
+        val wahr = cob.newLabel()
+        val ende = cob.newLabel()
+        val linksNichts = ausdruck.links is NichtsLiteral
+        val rechtsNichts = ausdruck.rechts is NichtsLiteral
+        if (linksNichts || rechtsNichts) {
+            val wert = if (linksNichts) ausdruck.rechts else ausdruck.links
+            val art = artVon(typVon(wert), wert.position)
+            erzeugeAusdruck(wert)
+            if (istReferenz(art)) {
+                if (ausdruck.operator == GLEICH) cob.ifnull(wahr) else cob.ifnonnull(wahr)
+            } else {
+                // Ein nicht-nullbarer Wert ist nie 'nichts'.
+                if (art == Art.GANZ || art == Art.KOMMA) cob.pop2() else cob.pop()
+                if (ausdruck.operator == UNGLEICH) cob.goto_(wahr)
+            }
+        } else {
+            erzeugeMitArt(
+                ausdruck.links, nullArt(artVon(typVon(ausdruck.links), ausdruck.links.position)),
+            )
+            erzeugeMitArt(
+                ausdruck.rechts, nullArt(artVon(typVon(ausdruck.rechts), ausdruck.rechts.position)),
+            )
+            cob.invokestatic(
+                CD_Objects, "equals",
+                MethodTypeDesc.of(
+                    ConstantDescs.CD_boolean, ConstantDescs.CD_Object, ConstantDescs.CD_Object,
+                ),
+            )
+            if (ausdruck.operator == GLEICH) cob.ifne(wahr) else cob.ifeq(wahr)
+        }
+        cob.iconst_0()
+        cob.goto_(ende)
+        cob.labelBinding(wahr)
+        cob.iconst_1()
+        cob.labelBinding(ende)
     }
 
     private fun erzeugeArithmetik(ausdruck: BinärAusdruck) {
@@ -805,6 +902,13 @@ class Bytecodeerzeuger(
             Art.ZEICH -> cob.invokestatic(
                 CD_String, "valueOf", MethodTypeDesc.of(CD_String, ConstantDescs.CD_char),
             )
+            else -> { // nullbare Arten (vom Typpruefer in '+' eigentlich ausgeschlossen)
+                ladeText("nichts")
+                cob.invokestatic(
+                    CD_Objects, "toString",
+                    MethodTypeDesc.of(CD_String, ConstantDescs.CD_Object, CD_String),
+                )
+            }
         }
     }
 
@@ -900,6 +1004,7 @@ class Bytecodeerzeuger(
                     sprungAufNull(vgl, ziel)
                 }
             }
+            else -> {} // nullbare Arten laufen ueber erzeugeNullVergleich
         }
     }
 
@@ -974,6 +1079,18 @@ class Bytecodeerzeuger(
         cob.getstatic(CD_System, "out", CD_PrintStream)
         val art = artVon(typVon(argument), argument.position)
         erzeugeAusdruck(argument)
+        if (istReferenz(art) && art != Art.TEXT) {
+            // Nullbarer Wert: 'nichts' -> "nichts", sonst die Standarddarstellung.
+            ladeText("nichts")
+            cob.invokestatic(
+                CD_Objects, "toString",
+                MethodTypeDesc.of(CD_String, ConstantDescs.CD_Object, CD_String),
+            )
+            cob.invokevirtual(
+                CD_PrintStream, "println", MethodTypeDesc.of(ConstantDescs.CD_void, CD_String),
+            )
+            return
+        }
         val parameter = when (art) {
             Art.WAHR -> {
                 wahrheitswertZuText()
@@ -983,6 +1100,7 @@ class Bytecodeerzeuger(
             Art.GANZ -> ConstantDescs.CD_long
             Art.KOMMA -> ConstantDescs.CD_double
             Art.ZEICH -> ConstantDescs.CD_char
+            else -> CD_String
         }
         cob.invokevirtual(CD_PrintStream, "println", MethodTypeDesc.of(ConstantDescs.CD_void, parameter))
     }
@@ -997,7 +1115,7 @@ class Bytecodeerzeuger(
     private fun erzeugeMitArt(ausdruck: Ausdruck, zielArt: Art) {
         val art = artVon(typVon(ausdruck), ausdruck.position)
         erzeugeAusdruck(ausdruck)
-        if (art == Art.GANZ && zielArt == Art.KOMMA) cob.l2d()
+        koerziere(art, zielArt)
     }
 
     // ---- Typermittlung ------------------------------------------------------
@@ -1040,6 +1158,8 @@ class Bytecodeerzeuger(
             for (fall in ausdruck.fälle) typ = gemeinsamerTyp(typ, typVon(fall.ergebnis))
             typ
         }
+        is ElvisAusdruck -> gemeinsamerTyp(entnullt(typVon(ausdruck.links)), typVon(ausdruck.rechts))
+        is NichtNullAusdruck -> entnullt(typVon(ausdruck.operand))
         is DiesAusdruck, is NeuAusdruck, is LambdaAusdruck, is IndexAusdruck, is FeldzugriffAusdruck ->
             ablehnen("Dieser Ausdruck wird vom Bytecode-Backend nicht unterstuetzt", ausdruck.position)
     }
@@ -1090,6 +1210,12 @@ class Bytecodeerzeuger(
         Art.WAHR -> ConstantDescs.CD_boolean
         Art.ZEICH -> ConstantDescs.CD_char
         Art.TEXT -> CD_String
+        Art.N_GANZ -> CD_Long
+        Art.N_KOMMA -> CD_Double
+        Art.N_WAHR -> CD_Boolean
+        Art.N_ZEICH -> CD_Character
+        Art.N_TEXT -> CD_String
+        Art.NICHTS -> ConstantDescs.CD_Object
     }
 
     private fun artVon(typ: Typ, position: Position): Art = when (typ) {
@@ -1098,10 +1224,42 @@ class Bytecodeerzeuger(
         WahrheitTyp -> Art.WAHR
         ZeichenTyp -> Art.ZEICH
         TextTyp -> Art.TEXT
+        NichtsTyp -> Art.NICHTS
+        is NullbarTyp -> when (typ.basis) {
+            GanzzahlTyp -> Art.N_GANZ
+            KommazahlTyp -> Art.N_KOMMA
+            WahrheitTyp -> Art.N_WAHR
+            ZeichenTyp -> Art.N_ZEICH
+            TextTyp -> Art.N_TEXT
+            else -> ablehnen(
+                "Der Typ '$typ' wird vom Bytecode-Backend (Kern) nicht unterstuetzt",
+                position,
+            )
+        }
         else -> ablehnen(
             "Der Typ '$typ' wird vom Bytecode-Backend (Kern) nicht unterstuetzt",
             position,
         )
+    }
+
+    private fun istReferenz(art: Art): Boolean =
+        art != Art.GANZ && art != Art.KOMMA && art != Art.WAHR && art != Art.ZEICH
+
+    private fun nullArt(art: Art): Art = when (art) {
+        Art.GANZ -> Art.N_GANZ
+        Art.KOMMA -> Art.N_KOMMA
+        Art.WAHR -> Art.N_WAHR
+        Art.ZEICH -> Art.N_ZEICH
+        else -> art
+    }
+
+    private fun entnullArt(art: Art): Art = when (art) {
+        Art.N_GANZ -> Art.GANZ
+        Art.N_KOMMA -> Art.KOMMA
+        Art.N_WAHR -> Art.WAHR
+        Art.N_ZEICH -> Art.ZEICH
+        Art.N_TEXT -> Art.TEXT
+        else -> art
     }
 
     private fun gemeinsameArt(links: Ausdruck, rechts: Ausdruck): Art {
@@ -1128,7 +1286,7 @@ class Bytecodeerzeuger(
             Art.GANZ -> cob.lload(slot)
             Art.KOMMA -> cob.dload(slot)
             Art.WAHR, Art.ZEICH -> cob.iload(slot)
-            Art.TEXT -> cob.aload(slot)
+            else -> cob.aload(slot) // Text und alle nullbaren Arten sind Referenzen
         }
     }
 
@@ -1137,7 +1295,7 @@ class Bytecodeerzeuger(
             Art.GANZ -> cob.lstore(slot)
             Art.KOMMA -> cob.dstore(slot)
             Art.WAHR, Art.ZEICH -> cob.istore(slot)
-            Art.TEXT -> cob.astore(slot)
+            else -> cob.astore(slot)
         }
     }
 
@@ -1146,7 +1304,7 @@ class Bytecodeerzeuger(
             Art.GANZ -> cob.lreturn()
             Art.KOMMA -> cob.dreturn()
             Art.WAHR, Art.ZEICH -> cob.ireturn()
-            Art.TEXT -> cob.areturn()
+            else -> cob.areturn()
         }
     }
 
@@ -1156,6 +1314,44 @@ class Bytecodeerzeuger(
             Art.KOMMA -> cob.loadConstant(0.0)
             Art.WAHR, Art.ZEICH -> cob.iconst_0()
             Art.TEXT -> ladeText("")
+            else -> cob.aconst_null() // nullbare Arten
+        }
+    }
+
+    /** Boxt einen nicht-nullbaren Grundwert in seinen nullbaren (Referenz-)Typ. */
+    private fun boxe(zielArt: Art) {
+        when (zielArt) {
+            Art.N_GANZ -> cob.invokestatic(CD_Long, "valueOf", MethodTypeDesc.of(CD_Long, ConstantDescs.CD_long))
+            Art.N_KOMMA -> cob.invokestatic(CD_Double, "valueOf", MethodTypeDesc.of(CD_Double, ConstantDescs.CD_double))
+            Art.N_WAHR -> cob.invokestatic(CD_Boolean, "valueOf", MethodTypeDesc.of(CD_Boolean, ConstantDescs.CD_boolean))
+            Art.N_ZEICH -> cob.invokestatic(CD_Character, "valueOf", MethodTypeDesc.of(CD_Character, ConstantDescs.CD_char))
+            else -> {} // N_TEXT/NICHTS sind bereits Referenzen
+        }
+    }
+
+    /** Entboxt einen nullbaren (Referenz-)Wert in seinen nicht-nullbaren Grundwert. */
+    private fun entboxe(art: Art) {
+        when (art) {
+            Art.N_GANZ -> cob.invokevirtual(CD_Long, "longValue", MethodTypeDesc.of(ConstantDescs.CD_long))
+            Art.N_KOMMA -> cob.invokevirtual(CD_Double, "doubleValue", MethodTypeDesc.of(ConstantDescs.CD_double))
+            Art.N_WAHR -> cob.invokevirtual(CD_Boolean, "booleanValue", MethodTypeDesc.of(ConstantDescs.CD_boolean))
+            Art.N_ZEICH -> cob.invokevirtual(CD_Character, "charValue", MethodTypeDesc.of(ConstantDescs.CD_char))
+            else -> {} // N_TEXT bleibt String
+        }
+    }
+
+    /** Wandelt einen Wert der Art [art] auf dem Stapel in die Art [zielArt] um. */
+    private fun koerziere(art: Art, zielArt: Art) {
+        if (art == zielArt) return
+        if (art == Art.NICHTS) return // 'nichts' (null) passt in jede nullbare Art
+        if (istReferenz(art) && istReferenz(zielArt) && classDesc(art) == classDesc(zielArt)) {
+            return // z. B. Text <-> Text?
+        }
+        when {
+            art == Art.GANZ && zielArt == Art.KOMMA -> cob.l2d()
+            art == Art.GANZ && zielArt == Art.N_KOMMA -> { cob.l2d(); boxe(Art.N_KOMMA) }
+            !istReferenz(art) && zielArt == nullArt(art) -> boxe(zielArt)
+            istReferenz(art) && zielArt == entnullArt(art) -> entboxe(art)
         }
     }
 
@@ -1170,6 +1366,11 @@ class Bytecodeerzeuger(
         val CD_CompletableFuture: ClassDesc = ClassDesc.of("java.util.concurrent.CompletableFuture")
         val CD_Supplier: ClassDesc = ClassDesc.of("java.util.function.Supplier")
         val CD_Long: ClassDesc = ClassDesc.of("java.lang.Long")
+        val CD_Double: ClassDesc = ClassDesc.of("java.lang.Double")
+        val CD_Boolean: ClassDesc = ClassDesc.of("java.lang.Boolean")
+        val CD_Character: ClassDesc = ClassDesc.of("java.lang.Character")
+        val CD_Objects: ClassDesc = ClassDesc.of("java.util.Objects")
+        val CD_NullPointerException: ClassDesc = ClassDesc.of("java.lang.NullPointerException")
 
         /** Bootstrap-Methode java.lang.invoke.LambdaMetafactory.metafactory fuer invokedynamic. */
         val METAFACTORY: DirectMethodHandleDesc = MethodHandleDesc.ofMethod(

@@ -115,6 +115,102 @@ class Typpruefer(
     private fun prüfeBlock(block: Block, bereich: Geltungsbereich) {
         for (anweisung in block.anweisungen) {
             prüfeAnweisung(anweisung, bereich)
+            // Fluss-Verfeinerung: bricht ein 'wenn'-Zweig ab, gilt danach die
+            // jeweils andere Bedingungsseite (z. B. nach 'wenn x == nichts { zurück }').
+            if (anweisung is WennAnweisung) {
+                if (terminiert(anweisung.dann)) {
+                    verfeinereImBereich(bereich, verfeinerungWennFalsch(anweisung.bedingung))
+                }
+                val sonst = anweisung.sonst
+                if (sonst != null && terminiert(sonst)) {
+                    verfeinereImBereich(bereich, verfeinerungWennWahr(anweisung.bedingung))
+                }
+            }
+        }
+    }
+
+    // ---- Nullsicherheit: Verfeinerung (smart cast) und Pruefung -------------
+
+    /** Meldet einen Fehler, falls [typ] `nichts` sein kann; liefert den entnullten Typ. */
+    private fun verlangeNichtNull(typ: Typ, position: Position, was: String): Typ = when {
+        typ is NullbarTyp -> {
+            diagnosen.melde("$was kann 'nichts' sein — benutze '?.', '?:' oder '!!'", position)
+            typ.basis
+        }
+        typ == NichtsTyp -> {
+            diagnosen.melde("$was ist immer 'nichts'", position)
+            FehlerTyp
+        }
+        else -> typ
+    }
+
+    private fun terminiert(anweisung: Anweisung): Boolean = when (anweisung) {
+        is ZurückAnweisung, is BrichAnweisung, is WeiterAnweisung -> true
+        is Block -> anweisung.anweisungen.any { terminiert(it) }
+        is WennAnweisung -> {
+            val sonst = anweisung.sonst
+            sonst != null && terminiert(anweisung.dann) && terminiert(sonst)
+        }
+        else -> false
+    }
+
+    /** Variablen, die garantiert nicht `nichts` sind, wenn [bedingung] wahr ist. */
+    private fun verfeinerungWennWahr(bedingung: Ausdruck): Set<String> = when (bedingung) {
+        is BinärAusdruck -> when (bedingung.operator) {
+            TokenTyp.UNGLEICH -> nullPrüfungsname(bedingung)?.let { setOf(it) } ?: emptySet()
+            TokenTyp.UND ->
+                verfeinerungWennWahr(bedingung.links) + verfeinerungWennWahr(bedingung.rechts)
+            TokenTyp.ODER ->
+                verfeinerungWennWahr(bedingung.links) intersect verfeinerungWennWahr(bedingung.rechts)
+            else -> emptySet()
+        }
+        is UnärAusdruck ->
+            if (bedingung.operator == TokenTyp.NICHT) verfeinerungWennFalsch(bedingung.operand)
+            else emptySet()
+        else -> emptySet()
+    }
+
+    /** Variablen, die garantiert nicht `nichts` sind, wenn [bedingung] falsch ist. */
+    private fun verfeinerungWennFalsch(bedingung: Ausdruck): Set<String> = when (bedingung) {
+        is BinärAusdruck -> when (bedingung.operator) {
+            TokenTyp.GLEICH -> nullPrüfungsname(bedingung)?.let { setOf(it) } ?: emptySet()
+            TokenTyp.UND ->
+                verfeinerungWennFalsch(bedingung.links) intersect verfeinerungWennFalsch(bedingung.rechts)
+            TokenTyp.ODER ->
+                verfeinerungWennFalsch(bedingung.links) + verfeinerungWennFalsch(bedingung.rechts)
+            else -> emptySet()
+        }
+        is UnärAusdruck ->
+            if (bedingung.operator == TokenTyp.NICHT) verfeinerungWennWahr(bedingung.operand)
+            else emptySet()
+        else -> emptySet()
+    }
+
+    /** Liefert den Variablennamen von `x == nichts` / `x != nichts`, sonst `null`. */
+    private fun nullPrüfungsname(ausdruck: BinärAusdruck): String? {
+        val links = ausdruck.links
+        val rechts = ausdruck.rechts
+        return when {
+            links is Bezeichner && rechts is NichtsLiteral -> links.name
+            rechts is Bezeichner && links is NichtsLiteral -> rechts.name
+            else -> null
+        }
+    }
+
+    /** Kindbereich, in dem die genannten stabilen Variablen als nicht-nullbar gelten. */
+    private fun verfeinere(bereich: Geltungsbereich, namen: Set<String>): Geltungsbereich {
+        val verfeinert = Geltungsbereich(bereich)
+        verfeinereImBereich(verfeinert, namen)
+        return verfeinert
+    }
+
+    private fun verfeinereImBereich(bereich: Geltungsbereich, namen: Set<String>) {
+        for (name in namen) {
+            val info = bereich.finde(name) ?: continue
+            val typ = info.typ
+            if (!info.wandelbar && typ is NullbarTyp) {
+                bereich.definiere(name, typ.basis, wandelbar = false)
+            }
         }
     }
 
@@ -160,20 +256,31 @@ class Typpruefer(
             is WennAnweisung -> {
                 val bedingung = prüfeAusdruck(anweisung.bedingung, bereich, WahrheitTyp)
                 erwarteWahrheit(bedingung, anweisung.bedingung.position, "Bedingung von 'wenn'")
-                prüfeBlock(anweisung.dann, Geltungsbereich(bereich))
-                anweisung.sonst?.let { prüfeAnweisung(it, bereich) }
+                prüfeBlock(
+                    anweisung.dann,
+                    verfeinere(bereich, verfeinerungWennWahr(anweisung.bedingung)),
+                )
+                anweisung.sonst?.let {
+                    prüfeAnweisung(it, verfeinere(bereich, verfeinerungWennFalsch(anweisung.bedingung)))
+                }
             }
 
             is SolangeAnweisung -> {
                 val bedingung = prüfeAusdruck(anweisung.bedingung, bereich, WahrheitTyp)
                 erwarteWahrheit(bedingung, anweisung.bedingung.position, "Bedingung von 'solange'")
                 schleifenTiefe++
-                prüfeBlock(anweisung.körper, Geltungsbereich(bereich))
+                prüfeBlock(
+                    anweisung.körper,
+                    verfeinere(bereich, verfeinerungWennWahr(anweisung.bedingung)),
+                )
                 schleifenTiefe--
             }
 
             is FürInAnweisung -> {
-                val iterierbar = prüfeAusdruck(anweisung.iterierbar, bereich, null)
+                val iterierbar = verlangeNichtNull(
+                    prüfeAusdruck(anweisung.iterierbar, bereich, null),
+                    anweisung.iterierbar.position, "Iterierbarer Ausdruck",
+                )
                 val elementTyp = when (iterierbar) {
                     is ListeTyp -> iterierbar.element
                     TextTyp -> ZeichenTyp
@@ -259,7 +366,10 @@ class Typpruefer(
                 }
             }
             is FeldzugriffAusdruck -> {
-                val basis = prüfeAusdruck(ziel.ziel, bereich, null)
+                val basis = verlangeNichtNull(
+                    prüfeAusdruck(ziel.ziel, bereich, null), ziel.position,
+                    "Empfaenger von '.${ziel.feld}'",
+                )
                 zielTyp = when (basis) {
                     is KlassenTyp -> {
                         val feld = basis.findeFeld(ziel.feld)
@@ -410,6 +520,17 @@ class Typpruefer(
                 ergebnis = if (erstes) sonst else gemeinsamerTyp(ergebnis, sonst)
                 ergebnis
             }
+
+            is ElvisAusdruck -> {
+                val links = prüfeAusdruck(ausdruck.links, bereich, erwartet?.let { nullbar(it) })
+                val rechts = prüfeAusdruck(ausdruck.rechts, bereich, erwartet)
+                gemeinsamerTyp(entnullt(links), rechts)
+            }
+
+            is NichtNullAusdruck -> {
+                val operand = prüfeAusdruck(ausdruck.operand, bereich, erwartet?.let { nullbar(it) })
+                entnullt(operand)
+            }
         }
 
     private fun prüfeMuster(muster: Ausdruck, bereich: Geltungsbereich): Typ {
@@ -430,59 +551,67 @@ class Typpruefer(
 
     private fun prüfeBinär(ausdruck: BinärAusdruck, bereich: Geltungsbereich): Typ {
         val links = prüfeAusdruck(ausdruck.links, bereich, null)
-        val rechts = prüfeAusdruck(ausdruck.rechts, bereich, null)
-        if (links == FehlerTyp || rechts == FehlerTyp) {
+        // 'und'/'oder' verfeinern den rechten Operanden (smart cast in Konjunktionen).
+        val rechtsBereich = when (ausdruck.operator) {
+            TokenTyp.UND -> verfeinere(bereich, verfeinerungWennWahr(ausdruck.links))
+            TokenTyp.ODER -> verfeinere(bereich, verfeinerungWennFalsch(ausdruck.links))
+            else -> bereich
+        }
+        val rechts = prüfeAusdruck(ausdruck.rechts, rechtsBereich, null)
+
+        // Gleichheit erlaubt nullbare Operanden (das ist die Nullpruefung selbst).
+        if (ausdruck.operator == TokenTyp.GLEICH || ausdruck.operator == TokenTyp.UNGLEICH) {
+            if (links != NichtsTyp && rechts != NichtsTyp &&
+                links != FehlerTyp && rechts != FehlerTyp &&
+                gemeinsamerTyp(links, rechts) == FehlerTyp
+            ) {
+                diagnosen.melde(
+                    "$links und $rechts koennen nicht verglichen werden", ausdruck.position,
+                )
+            }
+            return WahrheitTyp
+        }
+
+        // Alle anderen Operatoren verlangen nicht-nullbare Operanden.
+        val name = operatorText(ausdruck.operator)
+        val l = verlangeNichtNull(links, ausdruck.links.position, "Linker Operand von '$name'")
+        val r = verlangeNichtNull(rechts, ausdruck.rechts.position, "Rechter Operand von '$name'")
+        if (l == FehlerTyp || r == FehlerTyp) {
             return when (ausdruck.operator) {
-                TokenTyp.GLEICH, TokenTyp.UNGLEICH, TokenTyp.UND, TokenTyp.ODER,
-                TokenTyp.KLEINER, TokenTyp.KLEINER_GLEICH,
+                TokenTyp.UND, TokenTyp.ODER, TokenTyp.KLEINER, TokenTyp.KLEINER_GLEICH,
                 TokenTyp.GRÖSSER, TokenTyp.GRÖSSER_GLEICH -> WahrheitTyp
                 else -> FehlerTyp
             }
         }
         return when (ausdruck.operator) {
             TokenTyp.PLUS -> when {
-                links == TextTyp || rechts == TextTyp -> TextTyp
-                istNumerisch(links) && istNumerisch(rechts) -> numerischesErgebnis(links, rechts)
+                l == TextTyp || r == TextTyp -> TextTyp
+                istNumerisch(l) && istNumerisch(r) -> numerischesErgebnis(l, r)
                 else -> {
-                    diagnosen.melde("'+' passt nicht auf $links und $rechts", ausdruck.position)
+                    diagnosen.melde("'+' passt nicht auf $l und $r", ausdruck.position)
                     FehlerTyp
                 }
             }
             TokenTyp.MINUS, TokenTyp.STERN, TokenTyp.SCHRÄGSTRICH, TokenTyp.PROZENT -> {
-                if (istNumerisch(links) && istNumerisch(rechts)) {
-                    numerischesErgebnis(links, rechts)
+                if (istNumerisch(l) && istNumerisch(r)) {
+                    numerischesErgebnis(l, r)
                 } else {
-                    diagnosen.melde(
-                        "'${operatorText(ausdruck.operator)}' erwartet Zahlen, " +
-                            "erhielt $links und $rechts",
-                        ausdruck.position,
-                    )
+                    diagnosen.melde("'$name' erwartet Zahlen, erhielt $l und $r", ausdruck.position)
                     FehlerTyp
                 }
             }
             TokenTyp.UND, TokenTyp.ODER -> {
-                erwarteWahrheit(links, ausdruck.links.position, "'${operatorText(ausdruck.operator)}'")
-                erwarteWahrheit(rechts, ausdruck.rechts.position, "'${operatorText(ausdruck.operator)}'")
-                WahrheitTyp
-            }
-            TokenTyp.GLEICH, TokenTyp.UNGLEICH -> {
-                if (gemeinsamerTyp(links, rechts) == FehlerTyp) {
-                    diagnosen.melde(
-                        "$links und $rechts koennen nicht verglichen werden", ausdruck.position,
-                    )
-                }
+                erwarteWahrheit(l, ausdruck.links.position, "'$name'")
+                erwarteWahrheit(r, ausdruck.rechts.position, "'$name'")
                 WahrheitTyp
             }
             TokenTyp.KLEINER, TokenTyp.KLEINER_GLEICH,
             TokenTyp.GRÖSSER, TokenTyp.GRÖSSER_GLEICH -> {
-                val ordbar = (istNumerisch(links) && istNumerisch(rechts)) ||
-                    (links == TextTyp && rechts == TextTyp) ||
-                    (links == ZeichenTyp && rechts == ZeichenTyp)
+                val ordbar = (istNumerisch(l) && istNumerisch(r)) ||
+                    (l == TextTyp && r == TextTyp) ||
+                    (l == ZeichenTyp && r == ZeichenTyp)
                 if (!ordbar) {
-                    diagnosen.melde(
-                        "'${operatorText(ausdruck.operator)}' passt nicht auf $links und $rechts",
-                        ausdruck.position,
-                    )
+                    diagnosen.melde("'$name' passt nicht auf $l und $r", ausdruck.position)
                 }
                 WahrheitTyp
             }
@@ -515,7 +644,10 @@ class Typpruefer(
                         diagnosen.melde("'länge' erwartet genau ein Argument", ausdruck.position)
                         return GanzzahlTyp
                     }
-                    val arg = prüfeAusdruck(ausdruck.argumente[0], bereich, null)
+                    val arg = verlangeNichtNull(
+                        prüfeAusdruck(ausdruck.argumente[0], bereich, null),
+                        ausdruck.argumente[0].position, "Argument von 'länge'",
+                    )
                     if (arg != TextTyp && arg !is ListeTyp && arg !is AbbildungTyp && arg != FehlerTyp) {
                         diagnosen.melde(
                             "'länge' erwartet Text, Liste oder Abbildung, erhielt $arg",
@@ -612,7 +744,12 @@ class Typpruefer(
         argumente: List<Ausdruck>,
         bereich: Geltungsbereich,
     ): Typ {
-        val basis = prüfeAusdruck(ziel.ziel, bereich, null)
+        val rohBasis = prüfeAusdruck(ziel.ziel, bereich, null)
+        val basis = if (ziel.sicher) {
+            entnullt(rohBasis)
+        } else {
+            verlangeNichtNull(rohBasis, ziel.position, "Empfaenger von '.${ziel.feld}'")
+        }
         if (basis == FehlerTyp) {
             argumente.forEach { prüfeAusdruck(it, bereich, null) }
             return FehlerTyp
@@ -629,7 +766,8 @@ class Typpruefer(
             return FehlerTyp
         }
         prüfeArgumente(signatur.parameter, argumente, bereich, ziel.position, "Methode '${ziel.feld}'")
-        return signatur.rückgabe
+        // Ein sicherer Aufruf auf einem nullbaren Empfaenger liefert ein nullbares Ergebnis.
+        return if (ziel.sicher && istNullbar(rohBasis)) nullbar(signatur.rückgabe) else signatur.rückgabe
     }
 
     private fun prüfeFeldzugriff(ausdruck: FeldzugriffAusdruck, bereich: Geltungsbereich): Typ {
@@ -645,8 +783,13 @@ class Typpruefer(
                 return typ
             }
         }
-        val basis = prüfeAusdruck(ausdruck.ziel, bereich, null)
-        return when (basis) {
+        val rohBasis = prüfeAusdruck(ausdruck.ziel, bereich, null)
+        val basis = if (ausdruck.sicher) {
+            entnullt(rohBasis)
+        } else {
+            verlangeNichtNull(rohBasis, ausdruck.position, "Empfaenger von '.${ausdruck.feld}'")
+        }
+        val feldTyp = when (basis) {
             FehlerTyp -> FehlerTyp
             is DatensatzTyp -> basis.felder[ausdruck.feld] ?: run {
                 diagnosen.melde("$basis hat kein Feld '${ausdruck.feld}'", ausdruck.position)
@@ -671,10 +814,13 @@ class Typpruefer(
                 FehlerTyp
             }
         }
+        return if (ausdruck.sicher && istNullbar(rohBasis)) nullbar(feldTyp) else feldTyp
     }
 
     private fun prüfeIndex(ausdruck: IndexAusdruck, bereich: Geltungsbereich, schreibend: Boolean): Typ {
-        val basis = prüfeAusdruck(ausdruck.ziel, bereich, null)
+        val basis = verlangeNichtNull(
+            prüfeAusdruck(ausdruck.ziel, bereich, null), ausdruck.position, "Indexzugriff",
+        )
         val index = prüfeAusdruck(ausdruck.index, bereich, null)
         return when (basis) {
             FehlerTyp -> FehlerTyp

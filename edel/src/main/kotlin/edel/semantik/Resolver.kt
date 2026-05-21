@@ -12,6 +12,8 @@ class TypAuflöser(
     private val diagnosen: DiagnoseSammler,
 ) {
     fun auflöse(ausdruck: Typausdruck): Typ = when (ausdruck) {
+        is NullbarTypausdruck -> nullbar(auflöse(ausdruck.basis))
+
         is FunktionsTypausdruck ->
             FunktionsTyp(ausdruck.parameter.map { auflöse(it) }, auflöse(ausdruck.rückgabe))
 

@@ -25,6 +25,9 @@ class FunktionsTypausdruck(
     override val position: Position,
 ) : Typausdruck()
 
+/** Ein nullbarer Typ: `Basis?`. */
+class NullbarTypausdruck(val basis: Typausdruck, override val position: Position) : Typausdruck()
+
 // ===========================================================================
 // Gemeinsame Bausteine
 // ===========================================================================
@@ -80,11 +83,23 @@ class IndexAusdruck(
     override val position: Position,
 ) : Ausdruck()
 
+/** Feld- oder Methodenzugriff; [sicher] markiert den `?.`-Operator. */
 class FeldzugriffAusdruck(
     val ziel: Ausdruck,
     val feld: String,
     override val position: Position,
+    val sicher: Boolean = false,
 ) : Ausdruck()
+
+/** Elvis-Operator `links ?: rechts`: liefert [rechts], falls [links] `nichts` ist. */
+class ElvisAusdruck(
+    val links: Ausdruck,
+    val rechts: Ausdruck,
+    override val position: Position,
+) : Ausdruck()
+
+/** Nicht-null-Zusicherung `operand!!`: wirft zur Laufzeit, falls der Wert `nichts` ist. */
+class NichtNullAusdruck(val operand: Ausdruck, override val position: Position) : Ausdruck()
 
 /** Erzeugung eines Datensatzes oder Klassenobjekts: `neu Punkt(3, 4)`. */
 class NeuAusdruck(
