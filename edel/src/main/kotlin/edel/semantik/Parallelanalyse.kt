@@ -12,10 +12,23 @@ class GefangeneVariable(val name: String, val typ: Typ)
 /** Beschreibung einer als parallele Reduktion erkannten Schleife. */
 class Reduktion(val akkumulatoren: List<Akkumulator>, val gefangene: List<GefangeneVariable>)
 
-/** Ergebnis der Parallelanalyse: welche Schleifen automatisch parallelisierbar sind. */
-class Parallelplan(val reduktionen: Map<Anweisung, Reduktion>) {
+/**
+ * Eine "Gabelung": ein binaerer Ausdruck `A op B`, dessen Operanden beide rein
+ * und nicht trivial sind und daher nebenlaeufig (fork/join) berechnet werden
+ * koennen. [linkeGefangene] sind die freien Variablen des linken Operanden,
+ * [ergebnistyp] der Typ des Gesamtausdrucks (fuer das Bytecode-Backend).
+ */
+class Gabel(val linkeGefangene: List<GefangeneVariable>, val ergebnistyp: Typ)
+
+/** Ergebnis der Parallelanalyse: parallelisierbare Schleifen und Gabelungen. */
+class Parallelplan(
+    val reduktionen: Map<Anweisung, Reduktion>,
+    val gabeln: Map<BinärAusdruck, Gabel> = emptyMap(),
+) {
     val anzahl: Int get() = reduktionen.size
+    val gabelAnzahl: Int get() = gabeln.size
     fun reduktionVon(schleife: Anweisung): Reduktion? = reduktionen[schleife]
+    fun gabelVon(ausdruck: BinärAusdruck): Gabel? = gabeln[ausdruck]
 }
 
 /**
@@ -32,15 +45,77 @@ class Parallelanalyse(
     private val programm: Programm,
     private val symbole: GlobaleSymbole,
     private val bezeichnerTypen: Map<Bezeichner, Typ>,
+    private val binärTypen: Map<BinärAusdruck, Typ> = emptyMap(),
 ) {
     private val reineFunktionen: Set<String> by lazy { berechneReinheit() }
 
     fun analysiere(): Parallelplan {
         val reduktionen = LinkedHashMap<Anweisung, Reduktion>() // Quelltextreihenfolge
+        val gabeln = LinkedHashMap<BinärAusdruck, Gabel>()
         for (deklaration in programm.deklarationen) {
-            if (deklaration is FunktionDeklaration) sucheSchleifen(deklaration.körper, reduktionen)
+            if (deklaration is FunktionDeklaration) {
+                sucheSchleifen(deklaration.körper, reduktionen)
+                sucheGabeln(deklaration.körper, gabeln)
+            }
         }
-        return Parallelplan(reduktionen)
+        return Parallelplan(reduktionen, gabeln)
+    }
+
+    // ---- Gabelungen (unabhaengige reine Teilausdruecke) ---------------------
+
+    private fun sucheGabeln(körper: Block, ergebnis: MutableMap<BinärAusdruck, Gabel>) {
+        for (anweisung in alleAnweisungen(körper)) {
+            for (ausdruck in direkteAusdrücke(anweisung)) {
+                for (teil in alleTeilausdrücke(ausdruck)) {
+                    if (teil is BinärAusdruck && istGabelKandidat(teil)) {
+                        ergebnis[teil] = Gabel(
+                            gefangeneVon(teil.links),
+                            binärTypen[teil] ?: FehlerTyp,
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /** `A op B` ist gabelbar, wenn beide Operanden rein sind und je einen Aufruf enthalten. */
+    private fun istGabelKandidat(ausdruck: BinärAusdruck): Boolean {
+        if (ausdruck.operator == TokenTyp.UND || ausdruck.operator == TokenTyp.ODER) return false
+        return istReinerAusdruck(ausdruck.links) && enthältAufruf(ausdruck.links) &&
+            istReinerAusdruck(ausdruck.rechts) && enthältAufruf(ausdruck.rechts)
+    }
+
+    private fun enthältAufruf(ausdruck: Ausdruck): Boolean =
+        alleTeilausdrücke(ausdruck).any { it is AufrufAusdruck }
+
+    private fun istReinerAusdruck(ausdruck: Ausdruck): Boolean {
+        for (teil in alleTeilausdrücke(ausdruck)) {
+            if (teil is LambdaAusdruck) return false
+            if (teil is AufrufAusdruck) {
+                when (val ziel = teil.ziel) {
+                    is Bezeichner -> {
+                        if (ziel.name == "drucke" || ziel.name == "lies") return false
+                        if (ziel.name !in reineFunktionen && ziel.name !in REINE_EINGEBAUTE) return false
+                    }
+                    is FeldzugriffAusdruck -> if (ziel.feld !in REINE_METHODEN) return false
+                    else -> return false
+                }
+            }
+        }
+        return true
+    }
+
+    private fun gefangeneVon(ausdruck: Ausdruck): List<GefangeneVariable> {
+        val ergebnis = LinkedHashMap<String, Typ>()
+        for (teil in alleTeilausdrücke(ausdruck)) {
+            if (teil is Bezeichner &&
+                teil.name !in symbole.funktionen &&
+                teil.name !in Resolver.EINGEBAUTE_NAMEN
+            ) {
+                bezeichnerTypen[teil]?.let { ergebnis.putIfAbsent(teil.name, it) }
+            }
+        }
+        return ergebnis.map { GefangeneVariable(it.key, it.value) }
     }
 
     // ---- Schleifensuche -----------------------------------------------------
@@ -282,6 +357,9 @@ class Parallelanalyse(
             "länge", "holen", "istLeer", "großbuchstaben", "kleinbuchstaben",
             "zeichenBei", "enthält", "teile", "alsText", "schlüssel",
         )
+
+        /** Eingebaute Funktionen ohne Seiteneffekt (reine Abfrage bzw. Erzeugung). */
+        val REINE_EINGEBAUTE = setOf("länge", "Liste", "Abbildung", "Paar")
     }
 }
 

@@ -35,6 +35,9 @@ class Typpruefer(
     /** Typ jeder Namensverwendung; von der Parallelanalyse genutzt. */
     val bezeichnerTypen = HashMap<Bezeichner, Typ>()
 
+    /** Ergebnistyp jedes binaeren Ausdrucks; von der Parallelanalyse genutzt. */
+    val binärTypen = HashMap<BinärAusdruck, Typ>()
+
     fun prüfe() {
         for (d in programm.deklarationen) {
             when (d) {
@@ -357,7 +360,11 @@ class Typpruefer(
                 }
             }
 
-            is BinärAusdruck -> prüfeBinär(ausdruck, bereich)
+            is BinärAusdruck -> {
+                val typ = prüfeBinär(ausdruck, bereich)
+                binärTypen[ausdruck] = typ
+                typ
+            }
 
             is AufrufAusdruck -> prüfeAufruf(ausdruck, bereich, erwartet)
 

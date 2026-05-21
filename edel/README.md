@@ -167,15 +167,32 @@ Keine Fehler gefunden.
   [20:5] Reduktion ueber fakultät (*)
 ```
 
-Die Parallelisierung wirkt in **allen Ausführungsarten**: im Interpreter
-(`starte`), im JVM-Bytecode (`übersetze`) und im nativen Programm (`binär`) —
-im Bytecode entsteht daraus ein paralleler `LongStream`.
+**Unabhängige Rekursion (fork/join).** Ebenso erkennt der Compiler binäre
+Ausdrücke `A op B`, deren beide Operanden rein sind und Funktionsaufrufe
+enthalten — etwa die beiden Aufrufe in `fib(n - 1) + fib(n - 2)`. Sie werden
+nebenläufig im Fork-Join-Pool berechnet:
 
-*Edel auto-parallelizes provably-independent `für` loops with no keyword and no
-thread code. The compiler detects reductions (associative `+`/`*` accumulation
-over `Ganzzahl` variables) and runs them across all cores; the result is
-bit-identical to sequential execution. It works in the interpreter, the JVM
-bytecode, and the native binary alike.*
+```
+funktion fib(n: Ganzzahl): Ganzzahl {
+    wenn n < 2 { zurück n }
+    zurück fib(n - 1) + fib(n - 2)   // beide Aufrufe -> fork/join
+}
+```
+
+Eine Granularitätsschranke (`getSurplusQueuedTaskCount`) sorgt dafür, dass nur
+die oberen Rekursionsebenen forken und der Mehraufwand beschränkt bleibt.
+*Parallelität beschleunigt um einen festen Faktor (×Kerne) — sie ersetzt keinen
+besseren Algorithmus; naives `fib` bleibt exponentiell.*
+
+Beides wirkt in **allen Ausführungsarten**: im Interpreter (`starte`), im
+JVM-Bytecode (`übersetze`) und im nativen Programm (`binär`) — im Bytecode
+entstehen daraus ein paralleler `LongStream` bzw. `CompletableFuture`-Aufgaben.
+
+*Edel auto-parallelizes provably-independent work with no keyword and no thread
+code: reduction loops (associative `+`/`*` accumulation) and independent pure
+subexpressions such as the two recursive calls in `fib(n-1) + fib(n-2)`
+(fork/join, with a granularity cutoff). Results are bit-identical to sequential
+execution, in the interpreter, the JVM bytecode, and the native binary alike.*
 
 ## Bytecode-Backend / Bytecode back-end
 

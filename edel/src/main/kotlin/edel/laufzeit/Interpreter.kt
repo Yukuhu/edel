@@ -6,6 +6,8 @@ import edel.lexer.TokenTyp.*
 import edel.parser.*
 import edel.semantik.Parallelplan
 import edel.semantik.Reduktion
+import java.util.concurrent.Callable
+import java.util.concurrent.ForkJoinTask
 
 // Kontrollfluss-Signale; Stacktraces sind unnoetig und werden unterdrueckt.
 private class ZurückSignal(val wert: Wert) : RuntimeException() {
@@ -189,6 +191,28 @@ class Interpreter(
         !inParalleler.get() && anzahl >= 2 && Runtime.getRuntime().availableProcessors() >= 2
 
     /**
+     * Darf eine Gabelung nebenlaeufig ausgewertet werden? Innerhalb einer
+     * parallelen Schleife nicht; sonst nur, solange der Fork-Join-Pool nicht
+     * mit Aufgaben gesaettigt ist (selbstregulierende Granularitaet).
+     */
+    private fun darfGabeln(): Boolean =
+        !inParalleler.get() && ForkJoinTask.getSurplusQueuedTaskCount() <= 3
+
+    /**
+     * Wertet zwei unabhaengige reine Teilausdruecke nebenlaeufig aus: der linke
+     * Operand laeuft im Fork-Join-Pool, der rechte im aktuellen Thread.
+     */
+    private fun gabelEvaluiere(
+        links: Ausdruck,
+        rechts: Ausdruck,
+        umgebung: Umgebung,
+    ): Pair<Wert, Wert> {
+        val aufgabe = ForkJoinTask.adapt(Callable { evaluiere(links, umgebung) }).fork()
+        val rechtsWert = evaluiere(rechts, umgebung)
+        return aufgabe.join() to rechtsWert
+    }
+
+    /**
      * Fuehrt eine als parallele Reduktion erkannte Schleife nebenlaeufig aus:
      * die Iterationen werden gleichmaessig (verschraenkt) auf Threads verteilt,
      * jeder Thread fuehrt private Teil-Akkumulatoren, am Ende werden sie
@@ -314,11 +338,18 @@ class Interpreter(
                     if (wahrheit(evaluiere(ausdruck.links, umgebung))) WahrheitWert(true)
                     else WahrheitWert(wahrheit(evaluiere(ausdruck.rechts, umgebung)))
                 }
-                else -> binär(
-                    ausdruck.operator,
-                    evaluiere(ausdruck.links, umgebung),
-                    evaluiere(ausdruck.rechts, umgebung),
-                )
+                else -> {
+                    if (parallelplan.gabelVon(ausdruck) != null && darfGabeln()) {
+                        val (links, rechts) = gabelEvaluiere(ausdruck.links, ausdruck.rechts, umgebung)
+                        binär(ausdruck.operator, links, rechts)
+                    } else {
+                        binär(
+                            ausdruck.operator,
+                            evaluiere(ausdruck.links, umgebung),
+                            evaluiere(ausdruck.rechts, umgebung),
+                        )
+                    }
+                }
             }
         }
 

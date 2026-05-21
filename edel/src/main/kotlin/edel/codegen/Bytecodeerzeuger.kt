@@ -55,6 +55,9 @@ class Bytecodeerzeuger(
     // jeweils mit einem eindeutigen Index fuer die erzeugte `beitrag$n`-Methode.
     private var paralleleSchleifen: Map<FürVonBisAnweisung, Int> = emptyMap()
 
+    // Gabelbare binaere Ganzzahl-Ausdruecke, je mit Index fuer die `gabel$n`-Methode.
+    private var gabelIndizes: Map<BinärAusdruck, Int> = emptyMap()
+
     // ---- Einstieg -----------------------------------------------------------
 
     fun kompiliere(): ByteArray {
@@ -80,6 +83,17 @@ class Bytecodeerzeuger(
         val brauchtProdukt = parallele.keys.any {
             parallelplan.reduktionVon(it)!!.akkumulatoren[0].operator == STERN
         }
+
+        // Gabelbare binaere Ausdruecke erfassen (Ganzzahl-Arithmetik `+ - *`).
+        val gabeln = LinkedHashMap<BinärAusdruck, Int>()
+        for ((ausdruck, gabel) in parallelplan.gabeln) {
+            if (gabel.ergebnistyp == GanzzahlTyp &&
+                (ausdruck.operator == PLUS || ausdruck.operator == MINUS || ausdruck.operator == STERN)
+            ) {
+                gabeln[ausdruck] = gabeln.size
+            }
+        }
+        gabelIndizes = gabeln
 
         return ClassFile.of().build(selbst) { clb ->
             clb.withFlags(ClassFile.ACC_PUBLIC or ClassFile.ACC_FINAL)
@@ -129,7 +143,110 @@ class Bytecodeerzeuger(
                     code.lreturn()
                 }
             }
+            // Je eine 'gabel'-Methode pro gabelbarem Ausdruck (der linke Operand).
+            for ((ausdruck, index) in gabeln) {
+                val gabel = parallelplan.gabelVon(ausdruck)!!
+                val parameter = gabel.linkeGefangene.map {
+                    classDesc(artVon(it.typ, ausdruck.position))
+                }
+                clb.withMethodBody(
+                    "gabel$$index",
+                    MethodTypeDesc.of(ConstantDescs.CD_long, parameter),
+                    ClassFile.ACC_PRIVATE or ClassFile.ACC_STATIC,
+                ) { code ->
+                    cob = code
+                    erzeugeGabel(ausdruck, gabel)
+                }
+            }
         }
+    }
+
+    /** Erzeugt eine `gabel$n`-Methode: berechnet den linken Operanden einer Gabelung. */
+    private fun erzeugeGabel(ausdruck: BinärAusdruck, gabel: Gabel) {
+        nächsterSlot = 0
+        bereiche.clear()
+        schleifen.clear()
+        bereiche.addLast(HashMap())
+        rückgabeTyp = GanzzahlTyp
+        for (gefangen in gabel.linkeGefangene) {
+            val art = artVon(gefangen.typ, ausdruck.position)
+            bereiche.last()[gefangen.name] = Variable(gefangen.typ, art, belegeSlot(art))
+        }
+        erzeugeMitArt(ausdruck.links, Art.GANZ)
+        cob.lreturn()
+    }
+
+    /**
+     * Erzeugt eine Gabelung: der linke Operand wird per `CompletableFuture` im
+     * Fork-Join-Pool berechnet, der rechte im aktuellen Thread; danach werden
+     * beide mit dem Operator verknuepft. Eine Granularitaetsschranke
+     * (`getSurplusQueuedTaskCount`) vermeidet uebermaessiges Forken.
+     */
+    private fun erzeugeGabelArithmetik(ausdruck: BinärAusdruck) {
+        val index = gabelIndizes.getValue(ausdruck)
+        val gabel = parallelplan.gabelVon(ausdruck)!!
+        val gefangenDescs = gabel.linkeGefangene.map { classDesc(artVon(it.typ, ausdruck.position)) }
+        val sequentiell = cob.newLabel()
+        val ende = cob.newLabel()
+
+        cob.invokestatic(
+            CD_ForkJoinTask, "getSurplusQueuedTaskCount",
+            MethodTypeDesc.of(ConstantDescs.CD_int),
+        )
+        cob.loadConstant(3)
+        cob.if_icmpgt(sequentiell)
+
+        // Parallel: linker Operand als CompletableFuture, rechter inline.
+        for (gefangen in gabel.linkeGefangene) {
+            val variable = findeVariable(gefangen.name)
+                ?: ablehnen("Variable '${gefangen.name}' nicht gefunden", ausdruck.position)
+            lade(variable.art, variable.slot)
+        }
+        cob.invokedynamic(lieferantAufrufstelle(index, gefangenDescs))
+        cob.invokestatic(
+            CD_CompletableFuture, "supplyAsync",
+            MethodTypeDesc.of(CD_CompletableFuture, CD_Supplier),
+        )
+        val futureSlot = belegeSlot(Art.TEXT)
+        cob.astore(futureSlot)
+        erzeugeMitArt(ausdruck.rechts, Art.GANZ)
+        val rechtsSlot = belegeSlot(Art.GANZ)
+        cob.lstore(rechtsSlot)
+        cob.aload(futureSlot)
+        cob.invokevirtual(CD_CompletableFuture, "join", MethodTypeDesc.of(ConstantDescs.CD_Object))
+        cob.checkcast(CD_Long)
+        cob.invokevirtual(CD_Long, "longValue", MethodTypeDesc.of(ConstantDescs.CD_long))
+        cob.lload(rechtsSlot)
+        gabelOperator(ausdruck.operator)
+        cob.goto_(ende)
+
+        // Sequentiell.
+        cob.labelBinding(sequentiell)
+        erzeugeMitArt(ausdruck.links, Art.GANZ)
+        erzeugeMitArt(ausdruck.rechts, Art.GANZ)
+        gabelOperator(ausdruck.operator)
+
+        cob.labelBinding(ende)
+    }
+
+    private fun gabelOperator(operator: TokenTyp) {
+        when (operator) {
+            PLUS -> cob.ladd()
+            MINUS -> cob.lsub()
+            STERN -> cob.lmul()
+            else -> {}
+        }
+    }
+
+    private fun lieferantAufrufstelle(index: Int, gefangenDescs: List<ClassDesc>): DynamicCallSiteDesc {
+        val implTyp = MethodTypeDesc.of(ConstantDescs.CD_long, gefangenDescs)
+        val impl = MethodHandleDesc.ofMethod(
+            DirectMethodHandleDesc.Kind.STATIC, selbst, "gabel$$index", implTyp,
+        )
+        val samTyp = MethodTypeDesc.of(ConstantDescs.CD_Object)
+        val instanzTyp = MethodTypeDesc.of(CD_Long)
+        val fabrikTyp = MethodTypeDesc.of(CD_Supplier, gefangenDescs)
+        return DynamicCallSiteDesc.of(METAFACTORY, "get", fabrikTyp, samTyp, impl, instanzTyp)
     }
 
     /** Erzeugt den Rumpf einer `beitrag$n`-Methode: ein Schleifendurchlauf, der den Beitrag liefert. */
@@ -512,6 +629,8 @@ class Bytecodeerzeuger(
             PLUS, MINUS, STERN, SCHRÄGSTRICH, PROZENT -> {
                 if (ausdruck.operator == PLUS && typVon(ausdruck) == TextTyp) {
                     erzeugeVerkettung(ausdruck)
+                } else if (ausdruck in gabelIndizes) {
+                    erzeugeGabelArithmetik(ausdruck)
                 } else {
                     erzeugeArithmetik(ausdruck)
                 }
@@ -925,6 +1044,10 @@ class Bytecodeerzeuger(
         val CD_LongStream: ClassDesc = ClassDesc.of("java.util.stream.LongStream")
         val CD_LongUnaryOperator: ClassDesc = ClassDesc.of("java.util.function.LongUnaryOperator")
         val CD_LongBinaryOperator: ClassDesc = ClassDesc.of("java.util.function.LongBinaryOperator")
+        val CD_ForkJoinTask: ClassDesc = ClassDesc.of("java.util.concurrent.ForkJoinTask")
+        val CD_CompletableFuture: ClassDesc = ClassDesc.of("java.util.concurrent.CompletableFuture")
+        val CD_Supplier: ClassDesc = ClassDesc.of("java.util.function.Supplier")
+        val CD_Long: ClassDesc = ClassDesc.of("java.lang.Long")
 
         /** Bootstrap-Methode java.lang.invoke.LambdaMetafactory.metafactory fuer invokedynamic. */
         val METAFACTORY: DirectMethodHandleDesc = MethodHandleDesc.ofMethod(

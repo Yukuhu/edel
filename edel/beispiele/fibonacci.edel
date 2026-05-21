@@ -12,7 +12,7 @@ funktion gerade(n: Ganzzahl): Wahrheit {
 }
 
 funktion start() {
-    für i von 0 bis 50 {
+    für i von 0 bis 30 {
         sei art = wähle gerade(i) {
             fall wahr -> "gerade"
             sonst -> "ungerade"

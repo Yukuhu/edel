@@ -97,4 +97,37 @@ class ParallelTest {
         assertEquals(1, paralleleSchleifen(quelle))
         assertEquals(listOf("10100"), laufe(quelle))
     }
+
+    // ---- fork/join unabhaengiger Teilausdruecke (Rekursion) -----------------
+
+    private val FIB = "funktion fib(n: Ganzzahl): Ganzzahl { wenn n < 2 { zurück n } " +
+        "zurück fib(n - 1) + fib(n - 2) }\n"
+
+    private fun gabelungen(quelle: String): Int = analysiere(quelle).parallelplan!!.gabelAnzahl
+
+    @Test
+    fun erkenntGabelungUnabhaengigerRekursiverAufrufe() {
+        assertEquals(1, gabelungen(FIB + "funktion start() { drucke(fib(10)) }"))
+    }
+
+    @Test
+    fun parallelisierteRekursionLiefertExaktesErgebnis() {
+        assertEquals(listOf("832040"), laufe(FIB + "funktion start() { drucke(fib(30)) }"))
+    }
+
+    @Test
+    fun trivialerOperandWirdNichtGegabelt() {
+        // 'fib(n-1) + 1': ein Operand ohne Aufruf -> kein Forken (nur Mehraufwand).
+        val quelle = "funktion fib(n: Ganzzahl): Ganzzahl { wenn n < 2 { zurück n } " +
+            "zurück fib(n - 1) + 1 }\n" +
+            "funktion start() { drucke(fib(5)) }"
+        assertEquals(0, gabelungen(quelle))
+    }
+
+    @Test
+    fun unreinerTeilausdruckWirdNichtGegabelt() {
+        val quelle = "funktion laut(n: Ganzzahl): Ganzzahl { drucke(n) zurück n }\n" +
+            "funktion start() { drucke(laut(1) + laut(2)) }"
+        assertEquals(0, gabelungen(quelle))
+    }
 }

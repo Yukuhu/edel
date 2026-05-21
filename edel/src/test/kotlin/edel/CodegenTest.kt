@@ -84,6 +84,15 @@ class CodegenTest {
     }
 
     @Test
+    fun uebersetztParallelisierteRekursion() {
+        // fib(n-1) und fib(n-2) werden per CompletableFuture nebenlaeufig berechnet.
+        val quelle = "funktion fib(n: Ganzzahl): Ganzzahl { wenn n < 2 { zurück n } " +
+            "zurück fib(n - 1) + fib(n - 2) }\n" +
+            "funktion start() { drucke(fib(30)) }"
+        assertEquals("832040\n", kompiliereUndLaufe("ProbeGabelung", quelle))
+    }
+
+    @Test
     fun lehntNichtUnterstuetzteProgrammeAb() {
         val quelle = "datensatz Punkt(x: Ganzzahl, y: Ganzzahl)\nfunktion start() { }"
         val ergebnis = analysiere(quelle)

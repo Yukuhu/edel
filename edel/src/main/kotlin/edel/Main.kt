@@ -51,7 +51,9 @@ fun analysiere(quelle: String): AnalyseErgebnis {
     val parallelplan = if (diagnosen.hatFehler) {
         Parallelplan(emptyMap())
     } else {
-        Parallelanalyse(programm, symbole, typpruefer.bezeichnerTypen).analysiere()
+        Parallelanalyse(
+            programm, symbole, typpruefer.bezeichnerTypen, typpruefer.binärTypen,
+        ).analysiere()
     }
     return AnalyseErgebnis(programm, symbole, parallelplan, diagnosen.diagnosen)
 }
@@ -145,6 +147,14 @@ private fun befehlPrüfe(argumente: Array<String>) {
                     "${it.name} (${if (it.operator == edel.lexer.TokenTyp.STERN) "*" else "+"})"
                 }
                 println("  [${schleife.position}] Reduktion ueber $akkus")
+            }
+        }
+        if (plan != null && plan.gabelAnzahl > 0) {
+            println()
+            val wort = if (plan.gabelAnzahl == 1) "Ausdruck" else "Ausdruecke"
+            println("${plan.gabelAnzahl} unabhaengige(r) $wort werden per fork/join parallelisiert:")
+            for (ausdruck in plan.gabeln.keys) {
+                println("  [${ausdruck.position}] unabhaengige Operanden")
             }
         }
     } else {
