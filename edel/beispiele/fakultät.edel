@@ -1,0 +1,14 @@
+// Rekursion und Schleifen ueber eine Liste.
+
+funktion fakultät(n: Ganzzahl): Ganzzahl {
+    wenn n <= 1 {
+        zurück 1
+    }
+    zurück n * fakultät(n - 1)
+}
+
+funktion start() {
+    für z in Liste(1, 2, 3, 4, 5) {
+        drucke("fakultät(" + z + ") = " + fakultät(z))
+    }
+}

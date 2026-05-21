@@ -1,0 +1,6 @@
+// Absichtlich fehlerhaftes Programm: 'edel prüfe' meldet einen Typfehler.
+
+funktion start() {
+    sei x: Ganzzahl = "kein Text ist eine Ganzzahl"
+    drucke(x)
+}

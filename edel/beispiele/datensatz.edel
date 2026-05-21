@@ -1,0 +1,42 @@
+// Datensaetze, Klassen, Aufzaehlungen, Lambdas und Musterabgleich.
+
+datensatz Punkt(x: Ganzzahl, y: Ganzzahl)
+
+aufzählung Ampel { Rot, Gelb, Grün }
+
+klasse Zähler {
+    ver stand: Ganzzahl
+
+    funktion erhöhe() {
+        dies.stand = dies.stand + 1
+    }
+
+    funktion wert(): Ganzzahl {
+        zurück dies.stand
+    }
+}
+
+funktion beschreibe(a: Ampel): Text {
+    zurück wähle a {
+        fall Ampel.Rot -> "halt"
+        fall Ampel.Gelb -> "achtung"
+        sonst -> "fahr"
+    }
+}
+
+funktion start() {
+    sei p = neu Punkt(3, 4)
+    drucke("Punkt: " + p.x + ", " + p.y)
+
+    sei z = neu Zähler(0)
+    z.erhöhe()
+    z.erhöhe()
+    drucke("Zähler: " + z.wert())
+
+    sei verdopple = (n: Ganzzahl) -> n * 2
+    drucke("verdoppelt: " + verdopple(21))
+
+    für farbe in Liste(Ampel.Rot, Ampel.Gelb, Ampel.Grün) {
+        drucke(beschreibe(farbe))
+    }
+}

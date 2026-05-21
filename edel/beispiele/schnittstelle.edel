@@ -1,0 +1,32 @@
+// Schnittstellen, Klassen mit Vererbung und Sammlungen.
+
+schnittstelle Form {
+    funktion fläche(): Kommazahl
+}
+
+klasse Rechteck erfüllt Form {
+    ver breite: Kommazahl
+    ver höhe: Kommazahl
+
+    funktion fläche(): Kommazahl {
+        zurück dies.breite * dies.höhe
+    }
+}
+
+klasse Quadrat erweitert Rechteck {
+    funktion umfang(): Kommazahl {
+        zurück 4.0 * dies.breite
+    }
+}
+
+funktion start() {
+    sei r = neu Rechteck(3.0, 4.0)
+    drucke("Rechteckfläche: " + r.fläche())
+
+    sei q = neu Quadrat(2.0, 2.0)
+    drucke("Quadratfläche: " + q.fläche())
+    drucke("Quadratumfang: " + q.umfang())
+
+    sei noten = Abbildung(Paar("Anna", 1), Paar("Bert", 3))
+    drucke("Annas Note: " + noten.holen("Anna"))
+}

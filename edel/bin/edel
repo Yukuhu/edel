@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Starter fuer den Edel-Interpreter. Erwartet ein gebautes edel.jar.
+set -euo pipefail
+
+WURZEL="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+JAR="$WURZEL/build/libs/edel.jar"
+
+if [[ ! -f "$JAR" ]]; then
+    echo "edel.jar wurde nicht gefunden." >&2
+    echo "Bitte zuerst './gradlew fatJar' (oder './gradlew build') ausfuehren." >&2
+    exit 1
+fi
+
+exec java -jar "$JAR" "$@"

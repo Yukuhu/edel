@@ -1,0 +1,15 @@
+// Veraenderliche Bindungen, Zahlenbereiche und solange-Schleifen.
+
+funktion start() {
+    ver summe = 0
+    für i von 1 bis 10 {
+        summe = summe + i
+    }
+    drucke("Summe 1..10 = " + summe)
+
+    ver n = 0
+    solange n < 3 {
+        drucke("n = " + n)
+        n = n + 1
+    }
+}
