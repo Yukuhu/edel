@@ -7,12 +7,17 @@ import edel.lexer.TokenTyp
 import edel.lexer.TokenTyp.*
 import edel.parser.*
 import edel.semantik.*
+import edel.semantik.Parallelplan
+import edel.semantik.Reduktion
 import java.lang.classfile.ClassFile
 import java.lang.classfile.CodeBuilder
 import java.lang.classfile.Label
 import java.lang.constant.ClassDesc
 import java.lang.constant.ConstantDesc
 import java.lang.constant.ConstantDescs
+import java.lang.constant.DirectMethodHandleDesc
+import java.lang.constant.DynamicCallSiteDesc
+import java.lang.constant.MethodHandleDesc
 import java.lang.constant.MethodTypeDesc
 
 /**
@@ -29,6 +34,7 @@ class Bytecodeerzeuger(
     private val programm: Programm,
     private val symbole: GlobaleSymbole,
     private val klassenname: String,
+    private val parallelplan: Parallelplan = Parallelplan(emptyMap()),
 ) {
     private enum class Art { GANZ, KOMMA, WAHR, ZEICH, TEXT }
     private enum class Vgl { EQ, NE, LT, LE, GT, GE }
@@ -45,6 +51,10 @@ class Bytecodeerzeuger(
     private val schleifen = ArrayDeque<Schleife>()
     private var rückgabeTyp: Typ = NichtsTyp
 
+    // Parallel reduzierbare `für von bis`-Schleifen mit genau einem Akkumulator,
+    // jeweils mit einem eindeutigen Index fuer die erzeugte `beitrag$n`-Methode.
+    private var paralleleSchleifen: Map<FürVonBisAnweisung, Int> = emptyMap()
+
     // ---- Einstieg -----------------------------------------------------------
 
     fun kompiliere(): ByteArray {
@@ -58,6 +68,19 @@ class Bytecodeerzeuger(
             }
         }
         val funktionen = programm.deklarationen.filterIsInstance<FunktionDeklaration>()
+
+        // Parallel reduzierbare Schleifen erfassen (genau ein Ganzzahl-Akkumulator).
+        val parallele = LinkedHashMap<FürVonBisAnweisung, Int>()
+        for ((schleife, reduktion) in parallelplan.reduktionen) {
+            if (schleife is FürVonBisAnweisung && reduktion.akkumulatoren.size == 1) {
+                parallele[schleife] = parallele.size
+            }
+        }
+        paralleleSchleifen = parallele
+        val brauchtProdukt = parallele.keys.any {
+            parallelplan.reduktionVon(it)!!.akkumulatoren[0].operator == STERN
+        }
+
         return ClassFile.of().build(selbst) { clb ->
             clb.withFlags(ClassFile.ACC_PUBLIC or ClassFile.ACC_FINAL)
             // Einsprungpunkt: main ruft die Edel-Funktion start auf.
@@ -79,7 +102,125 @@ class Bytecodeerzeuger(
                     erzeugeFunktion(funktion)
                 }
             }
+            // Je eine 'beitrag'-Methode pro paralleler Schleife (das Lambda fuer den Stream).
+            for ((schleife, index) in parallele) {
+                val reduktion = parallelplan.reduktionVon(schleife)!!
+                val parameter = reduktion.gefangene.map { classDesc(artVon(it.typ, schleife.position)) } +
+                    ConstantDescs.CD_long
+                clb.withMethodBody(
+                    "beitrag$$index",
+                    MethodTypeDesc.of(ConstantDescs.CD_long, parameter),
+                    ClassFile.ACC_PRIVATE or ClassFile.ACC_STATIC,
+                ) { code ->
+                    cob = code
+                    erzeugeBeitrag(schleife, reduktion)
+                }
+            }
+            // Gemeinsame Multiplikationsfunktion fuer Produkt-Reduktionen.
+            if (brauchtProdukt) {
+                clb.withMethodBody(
+                    "produkt$",
+                    MethodTypeDesc.of(ConstantDescs.CD_long, ConstantDescs.CD_long, ConstantDescs.CD_long),
+                    ClassFile.ACC_PRIVATE or ClassFile.ACC_STATIC,
+                ) { code ->
+                    code.lload(0)
+                    code.lload(2)
+                    code.lmul()
+                    code.lreturn()
+                }
+            }
         }
+    }
+
+    /** Erzeugt den Rumpf einer `beitrag$n`-Methode: ein Schleifendurchlauf, der den Beitrag liefert. */
+    private fun erzeugeBeitrag(schleife: FürVonBisAnweisung, reduktion: Reduktion) {
+        nächsterSlot = 0
+        bereiche.clear()
+        schleifen.clear()
+        bereiche.addLast(HashMap())
+        rückgabeTyp = GanzzahlTyp
+        val akku = reduktion.akkumulatoren[0]
+
+        for (gefangen in reduktion.gefangene) {
+            val art = artVon(gefangen.typ, schleife.position)
+            bereiche.last()[gefangen.name] = Variable(gefangen.typ, art, belegeSlot(art))
+        }
+        val schleifenSlot = belegeSlot(Art.GANZ)
+        bereiche.last()[schleife.variable] = Variable(GanzzahlTyp, Art.GANZ, schleifenSlot)
+
+        val akkuSlot = belegeSlot(Art.GANZ)
+        cob.loadConstant(if (akku.operator == STERN) 1L else 0L)
+        cob.lstore(akkuSlot)
+        bereiche.last()[akku.name] = Variable(GanzzahlTyp, Art.GANZ, akkuSlot)
+
+        erzeugeBlock(schleife.körper)
+
+        cob.lload(akkuSlot)
+        cob.lreturn()
+    }
+
+    /**
+     * Erzeugt fuer eine parallele Reduktion einen `LongStream`:
+     * `akku = akku <op> rangeClosed(von, bis).parallel().map(beitrag)<.sum()|.reduce(1, *)>`.
+     */
+    private fun erzeugeParalleleReduktion(schleife: FürVonBisAnweisung) {
+        val index = paralleleSchleifen.getValue(schleife)
+        val reduktion = parallelplan.reduktionVon(schleife)!!
+        val akku = reduktion.akkumulatoren[0]
+        val akkuVariable = findeVariable(akku.name)
+            ?: ablehnen("Akkumulator '${akku.name}' nicht gefunden", schleife.position)
+        val gefangenDescs = reduktion.gefangene.map { classDesc(artVon(it.typ, schleife.position)) }
+
+        lade(akkuVariable.art, akkuVariable.slot) // bisheriger Wert des Akkumulators
+        erzeugeMitArt(schleife.von, Art.GANZ)
+        erzeugeMitArt(schleife.bis, Art.GANZ)
+        cob.invokestatic(
+            CD_LongStream, "rangeClosed",
+            MethodTypeDesc.of(CD_LongStream, ConstantDescs.CD_long, ConstantDescs.CD_long),
+            true,
+        )
+        cob.invokeinterface(CD_LongStream, "parallel", MethodTypeDesc.of(CD_LongStream))
+        for (gefangen in reduktion.gefangene) {
+            val variable = findeVariable(gefangen.name)
+                ?: ablehnen("Variable '${gefangen.name}' nicht gefunden", schleife.position)
+            lade(variable.art, variable.slot)
+        }
+        cob.invokedynamic(beitragAufrufstelle(index, gefangenDescs))
+        cob.invokeinterface(
+            CD_LongStream, "map",
+            MethodTypeDesc.of(CD_LongStream, CD_LongUnaryOperator),
+        )
+        if (akku.operator == STERN) {
+            cob.loadConstant(1L)
+            cob.invokedynamic(produktAufrufstelle())
+            cob.invokeinterface(
+                CD_LongStream, "reduce",
+                MethodTypeDesc.of(ConstantDescs.CD_long, ConstantDescs.CD_long, CD_LongBinaryOperator),
+            )
+            cob.lmul()
+        } else {
+            cob.invokeinterface(CD_LongStream, "sum", MethodTypeDesc.of(ConstantDescs.CD_long))
+            cob.ladd()
+        }
+        speichere(akkuVariable.art, akkuVariable.slot)
+    }
+
+    private fun beitragAufrufstelle(index: Int, gefangenDescs: List<ClassDesc>): DynamicCallSiteDesc {
+        val implTyp = MethodTypeDesc.of(ConstantDescs.CD_long, gefangenDescs + ConstantDescs.CD_long)
+        val impl = MethodHandleDesc.ofMethod(
+            DirectMethodHandleDesc.Kind.STATIC, selbst, "beitrag$$index", implTyp,
+        )
+        val samTyp = MethodTypeDesc.of(ConstantDescs.CD_long, ConstantDescs.CD_long)
+        val fabrikTyp = MethodTypeDesc.of(CD_LongUnaryOperator, gefangenDescs)
+        return DynamicCallSiteDesc.of(METAFACTORY, "applyAsLong", fabrikTyp, samTyp, impl, samTyp)
+    }
+
+    private fun produktAufrufstelle(): DynamicCallSiteDesc {
+        val typ = MethodTypeDesc.of(ConstantDescs.CD_long, ConstantDescs.CD_long, ConstantDescs.CD_long)
+        val impl = MethodHandleDesc.ofMethod(DirectMethodHandleDesc.Kind.STATIC, selbst, "produkt$", typ)
+        return DynamicCallSiteDesc.of(
+            METAFACTORY, "applyAsLong", MethodTypeDesc.of(CD_LongBinaryOperator), typ, impl, typ,
+        )
     }
 
     private fun erzeugeFunktion(funktion: FunktionDeklaration) {
@@ -218,6 +359,10 @@ class Bytecodeerzeuger(
     }
 
     private fun erzeugeFürVonBis(anweisung: FürVonBisAnweisung) {
+        if (anweisung in paralleleSchleifen) {
+            erzeugeParalleleReduktion(anweisung)
+            return
+        }
         bereiche.addLast(HashMap())
         val variablenSlot = belegeSlot(Art.GANZ)
         val grenzeSlot = belegeSlot(Art.GANZ)
@@ -777,5 +922,24 @@ class Bytecodeerzeuger(
         val CD_String: ClassDesc = ConstantDescs.CD_String
         val CD_System: ClassDesc = ClassDesc.of("java.lang.System")
         val CD_PrintStream: ClassDesc = ClassDesc.of("java.io.PrintStream")
+        val CD_LongStream: ClassDesc = ClassDesc.of("java.util.stream.LongStream")
+        val CD_LongUnaryOperator: ClassDesc = ClassDesc.of("java.util.function.LongUnaryOperator")
+        val CD_LongBinaryOperator: ClassDesc = ClassDesc.of("java.util.function.LongBinaryOperator")
+
+        /** Bootstrap-Methode java.lang.invoke.LambdaMetafactory.metafactory fuer invokedynamic. */
+        val METAFACTORY: DirectMethodHandleDesc = MethodHandleDesc.ofMethod(
+            DirectMethodHandleDesc.Kind.STATIC,
+            ClassDesc.of("java.lang.invoke.LambdaMetafactory"),
+            "metafactory",
+            MethodTypeDesc.of(
+                ConstantDescs.CD_CallSite,
+                ConstantDescs.CD_MethodHandles_Lookup,
+                ConstantDescs.CD_String,
+                ConstantDescs.CD_MethodType,
+                ConstantDescs.CD_MethodType,
+                ConstantDescs.CD_MethodHandle,
+                ConstantDescs.CD_MethodType,
+            ),
+        )
     }
 }

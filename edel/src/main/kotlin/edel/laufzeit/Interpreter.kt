@@ -4,6 +4,8 @@ import edel.fehler.LaufzeitFehler
 import edel.lexer.TokenTyp
 import edel.lexer.TokenTyp.*
 import edel.parser.*
+import edel.semantik.Parallelplan
+import edel.semantik.Reduktion
 
 // Kontrollfluss-Signale; Stacktraces sind unnoetig und werden unterdrueckt.
 private class ZurückSignal(val wert: Wert) : RuntimeException() {
@@ -22,11 +24,16 @@ private class WeiterSignal : RuntimeException() {
  */
 class Interpreter(
     private val programm: Programm,
+    private val parallelplan: Parallelplan = Parallelplan(emptyMap()),
     private val ausgabe: (String) -> Unit = ::println,
 ) {
     private val global = Umgebung()
     private val klassen = HashMap<String, KlasseDeklaration>()
     private val datensätze = HashMap<String, DatensatzDeklaration>()
+
+    // True innerhalb eines parallelen Schleifendurchlaufs; verschachtelte
+    // Schleifen laufen dann sequentiell.
+    private val inParalleler = ThreadLocal.withInitial { false }
 
     fun starte() {
         registriereDeklarationen()
@@ -117,14 +124,22 @@ class Interpreter(
                     is TextWert -> iterierbar.wert.map { ZeichenWert(it) }
                     else -> throw LaufzeitFehler("Ueber ${darstelle(iterierbar)} kann nicht iteriert werden")
                 }
-                for (element in elemente) {
-                    val schleifenUmgebung = Umgebung(umgebung)
-                    schleifenUmgebung.definiere(anweisung.variable, element)
-                    try {
-                        führeBlockAus(anweisung.körper, schleifenUmgebung)
-                    } catch (_: WeiterSignal) {
-                    } catch (_: BrichSignal) {
-                        break
+                val reduktion = parallelplan.reduktionVon(anweisung)
+                if (reduktion != null && darfParallel(elemente.size.toLong())) {
+                    führeParalleleReduktion(
+                        reduktion, anweisung.variable, anweisung.körper, umgebung,
+                        elemente.size.toLong(),
+                    ) { k -> elemente[k.toInt()] }
+                } else {
+                    for (element in elemente) {
+                        val schleifenUmgebung = Umgebung(umgebung)
+                        schleifenUmgebung.definiere(anweisung.variable, element)
+                        try {
+                            führeBlockAus(anweisung.körper, schleifenUmgebung)
+                        } catch (_: WeiterSignal) {
+                        } catch (_: BrichSignal) {
+                            break
+                        }
                     }
                 }
             }
@@ -132,17 +147,25 @@ class Interpreter(
             is FürVonBisAnweisung -> {
                 val von = (evaluiere(anweisung.von, umgebung) as GanzzahlWert).wert
                 val bis = (evaluiere(anweisung.bis, umgebung) as GanzzahlWert).wert
-                var i = von
-                while (i <= bis) {
-                    val schleifenUmgebung = Umgebung(umgebung)
-                    schleifenUmgebung.definiere(anweisung.variable, GanzzahlWert(i))
-                    try {
-                        führeBlockAus(anweisung.körper, schleifenUmgebung)
-                    } catch (_: WeiterSignal) {
-                    } catch (_: BrichSignal) {
-                        break
+                val reduktion = parallelplan.reduktionVon(anweisung)
+                if (reduktion != null && darfParallel(bis - von + 1)) {
+                    führeParalleleReduktion(
+                        reduktion, anweisung.variable, anweisung.körper, umgebung,
+                        bis - von + 1,
+                    ) { k -> GanzzahlWert(von + k) }
+                } else {
+                    var i = von
+                    while (i <= bis) {
+                        val schleifenUmgebung = Umgebung(umgebung)
+                        schleifenUmgebung.definiere(anweisung.variable, GanzzahlWert(i))
+                        try {
+                            führeBlockAus(anweisung.körper, schleifenUmgebung)
+                        } catch (_: WeiterSignal) {
+                        } catch (_: BrichSignal) {
+                            break
+                        }
+                        i++
                     }
-                    i++
                 }
             }
 
@@ -158,6 +181,71 @@ class Interpreter(
 
     private fun führeBlockAus(block: Block, umgebung: Umgebung) {
         for (anweisung in block.anweisungen) führeAnweisungAus(anweisung, umgebung)
+    }
+
+    // ---- Automatische Parallelisierung -------------------------------------
+
+    private fun darfParallel(anzahl: Long): Boolean =
+        !inParalleler.get() && anzahl >= 2 && Runtime.getRuntime().availableProcessors() >= 2
+
+    /**
+     * Fuehrt eine als parallele Reduktion erkannte Schleife nebenlaeufig aus:
+     * die Iterationen werden gleichmaessig (verschraenkt) auf Threads verteilt,
+     * jeder Thread fuehrt private Teil-Akkumulatoren, am Ende werden sie
+     * zusammengefuehrt. Da `+`/`*` assoziativ sind, ist das Ergebnis identisch
+     * zur sequentiellen Ausfuehrung.
+     */
+    private fun führeParalleleReduktion(
+        reduktion: Reduktion,
+        schleifenVariable: String,
+        körper: Block,
+        umgebung: Umgebung,
+        anzahl: Long,
+        wertBei: (Long) -> Wert,
+    ) {
+        val akkus = reduktion.akkumulatoren
+        val chunks = minOf(Runtime.getRuntime().availableProcessors().toLong(), anzahl).toInt()
+        val teilergebnisse = arrayOfNulls<LongArray>(chunks)
+        val fehler = arrayOfNulls<Throwable>(chunks)
+
+        fun identität(operator: TokenTyp): Long = if (operator == STERN) 1L else 0L
+
+        val threads = (0 until chunks).map { k ->
+            Thread {
+                try {
+                    inParalleler.set(true)
+                    val chunkUmgebung = Umgebung(umgebung)
+                    for (akku in akkus) {
+                        chunkUmgebung.definiere(akku.name, GanzzahlWert(identität(akku.operator)))
+                    }
+                    var index = k.toLong()
+                    while (index < anzahl) {
+                        val iterUmgebung = Umgebung(chunkUmgebung)
+                        iterUmgebung.definiere(schleifenVariable, wertBei(index))
+                        führeBlockAus(körper, iterUmgebung)
+                        index += chunks
+                    }
+                    teilergebnisse[k] = LongArray(akkus.size) { i ->
+                        (chunkUmgebung.hole(akkus[i].name) as GanzzahlWert).wert
+                    }
+                } catch (t: Throwable) {
+                    fehler[k] = t
+                }
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+        fehler.firstOrNull { it != null }?.let { throw it }
+
+        // Teil-Akkumulatoren mit dem Ausgangswert zusammenfuehren.
+        for ((i, akku) in akkus.withIndex()) {
+            var ergebnis = (umgebung.hole(akku.name) as GanzzahlWert).wert
+            for (k in 0 until chunks) {
+                val teil = teilergebnisse[k]!![i]
+                ergebnis = if (akku.operator == STERN) ergebnis * teil else ergebnis + teil
+            }
+            umgebung.setze(akku.name, GanzzahlWert(ergebnis))
+        }
     }
 
     private fun führeZuweisungAus(anweisung: ZuweisungAnweisung, umgebung: Umgebung) {

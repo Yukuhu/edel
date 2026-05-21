@@ -25,7 +25,9 @@ class CodegenTest {
     private fun kompiliereUndLaufe(klassenname: String, quelle: String): String {
         val ergebnis = analysiere(quelle)
         assertEquals(emptyList(), ergebnis.diagnosen, "Quelle sollte fehlerfrei sein")
-        val bytes = Bytecodeerzeuger(ergebnis.programm!!, ergebnis.symbole!!, klassenname).kompiliere()
+        val bytes = Bytecodeerzeuger(
+            ergebnis.programm!!, ergebnis.symbole!!, klassenname, ergebnis.parallelplan!!,
+        ).kompiliere()
         val klasse = ByteKlassenlader().definiere(klassenname, bytes)
 
         val puffer = ByteArrayOutputStream()
@@ -66,6 +68,19 @@ class CodegenTest {
     fun uebersetztKommazahlen() {
         val quelle = "funktion start() { sei x = 7.0 / 2.0 drucke(x) drucke(3 + 1.5) }"
         assertEquals("3.5\n4.5\n", kompiliereUndLaufe("ProbeKomma", quelle))
+    }
+
+    @Test
+    fun uebersetztParalleleSummenreduktion() {
+        // Wird zu LongStream.rangeClosed(..).parallel().map(..).sum() uebersetzt.
+        val quelle = "funktion start() { ver s = 0 für i von 1 bis 1000000 { s = s + i } drucke(s) }"
+        assertEquals("500000500000\n", kompiliereUndLaufe("ProbeParallelSumme", quelle))
+    }
+
+    @Test
+    fun uebersetztParalleleProduktreduktion() {
+        val quelle = "funktion start() { ver p = 1 für i von 1 bis 20 { p = p * i } drucke(p) }"
+        assertEquals("2432902008176640000\n", kompiliereUndLaufe("ProbeParallelProdukt", quelle))
     }
 
     @Test

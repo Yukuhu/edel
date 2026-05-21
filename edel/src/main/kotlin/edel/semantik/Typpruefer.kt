@@ -32,6 +32,9 @@ class Typpruefer(
     private var aktuelleKlasse: KlassenTyp? = null
     private var schleifenTiefe = 0
 
+    /** Typ jeder Namensverwendung; von der Parallelanalyse genutzt. */
+    val bezeichnerTypen = HashMap<Bezeichner, Typ>()
+
     fun prüfe() {
         for (d in programm.deklarationen) {
             when (d) {
@@ -308,7 +311,7 @@ class Typpruefer(
 
             is Bezeichner -> {
                 val info = bereich.finde(ausdruck.name)
-                when {
+                val typ = when {
                     info != null -> info.typ
                     ausdruck.name in symbole.funktionen -> symbole.funktionen[ausdruck.name]!!
                     ausdruck.name in Resolver.EINGEBAUTE_NAMEN -> {
@@ -323,6 +326,8 @@ class Typpruefer(
                         FehlerTyp
                     }
                 }
+                bezeichnerTypen[ausdruck] = typ
+                typ
             }
 
             is DiesAusdruck -> {

@@ -12,6 +12,8 @@ import edel.parser.FunktionDeklaration
 import edel.parser.Parser
 import edel.parser.Programm
 import edel.semantik.GlobaleSymbole
+import edel.semantik.Parallelanalyse
+import edel.semantik.Parallelplan
 import edel.semantik.Resolver
 import edel.semantik.Typpruefer
 import java.io.File
@@ -21,30 +23,37 @@ import kotlin.system.exitProcess
 
 const val VERSION = "0.1.0"
 
-/** Ergebnis der statischen Analyse: Syntaxbaum, Symboltabelle und Diagnosen. */
+/** Ergebnis der statischen Analyse: Syntaxbaum, Symboltabelle, Parallelplan, Diagnosen. */
 class AnalyseErgebnis(
     val programm: Programm?,
     val symbole: GlobaleSymbole?,
+    val parallelplan: Parallelplan?,
     val diagnosen: List<Diagnose>,
 ) {
     val erfolgreich: Boolean get() = programm != null && diagnosen.isEmpty()
 }
 
 /**
- * Fuehrt die volle statische Pipeline aus: Lexer, Parser, Resolver, Typpruefer.
- * Lexer- und Parserfehler werden als einzelne Diagnose zurueckgegeben.
+ * Fuehrt die volle statische Pipeline aus: Lexer, Parser, Resolver, Typpruefer
+ * und Parallelanalyse. Lexer-/Parserfehler werden als einzelne Diagnose gemeldet.
  */
 fun analysiere(quelle: String): AnalyseErgebnis {
     val programm = try {
         val tokens = Lexer(quelle).zerlege()
         Parser(tokens).parse()
     } catch (fehler: QuellFehler) {
-        return AnalyseErgebnis(null, null, listOf(fehler.diagnose))
+        return AnalyseErgebnis(null, null, null, listOf(fehler.diagnose))
     }
     val diagnosen = DiagnoseSammler()
     val symbole = Resolver(programm, diagnosen).auflösen()
-    Typpruefer(programm, symbole, diagnosen).prüfe()
-    return AnalyseErgebnis(programm, symbole, diagnosen.diagnosen)
+    val typpruefer = Typpruefer(programm, symbole, diagnosen)
+    typpruefer.prüfe()
+    val parallelplan = if (diagnosen.hatFehler) {
+        Parallelplan(emptyMap())
+    } else {
+        Parallelanalyse(programm, symbole, typpruefer.bezeichnerTypen).analysiere()
+    }
+    return AnalyseErgebnis(programm, symbole, parallelplan, diagnosen.diagnosen)
 }
 
 /** Analysiert und interpretiert Quelltext; nuetzlich fuer Tests. */
@@ -54,7 +63,7 @@ fun interpretiere(quelle: String, ausgabe: (String) -> Unit) {
         throw QuellFehler(ergebnis.diagnosen.firstOrNull()
             ?: Diagnose("Unbekannter Analysefehler", edel.fehler.Position(0, 0)))
     }
-    Interpreter(ergebnis.programm!!, ausgabe).starte()
+    Interpreter(ergebnis.programm!!, ergebnis.parallelplan!!, ausgabe).starte()
 }
 
 fun main(argumente: Array<String>) {
@@ -114,7 +123,7 @@ private fun befehlStarte(argumente: Array<String>) {
     val ergebnis = analysiereDateiOderBeende(argumente)
     prüfeStartVorhanden(ergebnis.programm!!)
     try {
-        Interpreter(ergebnis.programm).starte()
+        Interpreter(ergebnis.programm, ergebnis.parallelplan!!).starte()
     } catch (fehler: LaufzeitFehler) {
         System.err.println("Laufzeitfehler: ${fehler.message}")
         exitProcess(1)
@@ -126,6 +135,18 @@ private fun befehlPrüfe(argumente: Array<String>) {
     val ergebnis = analysiere(quelle)
     if (ergebnis.diagnosen.isEmpty()) {
         println("Keine Fehler gefunden.")
+        val plan = ergebnis.parallelplan
+        if (plan != null && plan.anzahl > 0) {
+            println()
+            val wort = if (plan.anzahl == 1) "Schleife" else "Schleifen"
+            println("${plan.anzahl} $wort werden automatisch parallelisiert:")
+            for ((schleife, reduktion) in plan.reduktionen) {
+                val akkus = reduktion.akkumulatoren.joinToString(", ") {
+                    "${it.name} (${if (it.operator == edel.lexer.TokenTyp.STERN) "*" else "+"})"
+                }
+                println("  [${schleife.position}] Reduktion ueber $akkus")
+            }
+        }
     } else {
         druckeDiagnosen(ergebnis.diagnosen)
         exitProcess(1)
@@ -139,7 +160,9 @@ private fun kompiliereZuBytecode(argumente: Array<String>): Pair<File, ByteArray
     val quelldatei = File(argumente[1]).absoluteFile
     val klassenname = quelldatei.nameWithoutExtension
     val bytes = try {
-        Bytecodeerzeuger(ergebnis.programm, ergebnis.symbole!!, klassenname).kompiliere()
+        Bytecodeerzeuger(
+            ergebnis.programm, ergebnis.symbole!!, klassenname, ergebnis.parallelplan!!,
+        ).kompiliere()
     } catch (fehler: NichtUnterstützt) {
         System.err.println(fehler.diagnose.formatiert())
         System.err.println(

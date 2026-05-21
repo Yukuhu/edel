@@ -1,0 +1,24 @@
+// Automatische Parallelisierung.
+//
+// Der Compiler erkennt, dass die Iterationen dieser Schleifen voneinander
+// unabhängig sind (Reduktionen über 'summe' bzw. 'fakultät') und verteilt sie
+// über alle Prozessorkerne — im Interpreter wie im erzeugten Bytecode.
+// Das Ergebnis ist identisch zur sequentiellen Ausführung.
+
+funktion quadratrest(n: Ganzzahl): Ganzzahl {
+    zurück (n * n) % 1000
+}
+
+funktion start() {
+    ver summe = 0
+    für i von 1 bis 1000000 {
+        summe = summe + quadratrest(i)
+    }
+    drucke("Summe = " + summe)
+
+    ver fakultät = 1
+    für k von 1 bis 20 {
+        fakultät = fakultät * k
+    }
+    drucke("20! = " + fakultät)
+}

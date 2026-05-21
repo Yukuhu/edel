@@ -136,6 +136,47 @@ statisch importiere paket`
 
 ---
 
+## Automatische Parallelisierung / Automatic parallelism
+
+Edel parallelisiert geeignete `für`-Schleifen **automatisch** — ohne
+Schlüsselwort, ohne Thread-Code. Der Compiler beweist die Unabhängigkeit der
+Iterationen und erkennt **Reduktionen**: Schleifen, die äußere
+`Ganzzahl`-Variablen über einen festen assoziativen Operator (`+` oder `*`)
+fortschreiben.
+
+```
+ver summe = 0
+für i von 1 bis 10000000 {
+    summe = summe + quadratrest(i)   // quadratrest ist rein -> Iterationen unabhängig
+}
+```
+
+Parallelisiert wird, wenn der Rumpf nur Akkumulatoren über `+`/`*` fortschreibt,
+keine Ein-/Ausgabe macht, kein `brich`/`zurück` enthält und nur reine Funktionen
+aufruft. Da `+` und `*` auf 64-Bit-Ganzzahlen assoziativ und kommutativ sind,
+ist das Ergebnis **bitgleich** zur sequentiellen Ausführung — Gleitkomma-
+Akkumulatoren bleiben deshalb sequentiell. `edel prüfe` zeigt die erkannten
+Schleifen:
+
+```
+$ edel prüfe beispiele/parallel.edel
+Keine Fehler gefunden.
+
+2 Schleifen werden automatisch parallelisiert:
+  [14:5] Reduktion ueber summe (+)
+  [20:5] Reduktion ueber fakultät (*)
+```
+
+Die Parallelisierung wirkt in **allen Ausführungsarten**: im Interpreter
+(`starte`), im JVM-Bytecode (`übersetze`) und im nativen Programm (`binär`) —
+im Bytecode entsteht daraus ein paralleler `LongStream`.
+
+*Edel auto-parallelizes provably-independent `für` loops with no keyword and no
+thread code. The compiler detects reductions (associative `+`/`*` accumulation
+over `Ganzzahl` variables) and runs them across all cores; the result is
+bit-identical to sequential execution. It works in the interpreter, the JVM
+bytecode, and the native binary alike.*
+
 ## Bytecode-Backend / Bytecode back-end
 
 `edel übersetze` kompiliert ein Programm zu einer echten JVM-`.class`-Datei über
