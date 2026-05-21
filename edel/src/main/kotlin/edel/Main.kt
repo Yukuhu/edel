@@ -1,14 +1,17 @@
 package edel
 
+import edel.codegen.Bytecodeerzeuger
 import edel.fehler.Diagnose
 import edel.fehler.DiagnoseSammler
 import edel.fehler.LaufzeitFehler
+import edel.fehler.NichtUnterstützt
 import edel.fehler.QuellFehler
 import edel.laufzeit.Interpreter
 import edel.lexer.Lexer
 import edel.parser.FunktionDeklaration
 import edel.parser.Parser
 import edel.parser.Programm
+import edel.semantik.GlobaleSymbole
 import edel.semantik.Resolver
 import edel.semantik.Typpruefer
 import java.io.File
@@ -16,8 +19,12 @@ import kotlin.system.exitProcess
 
 const val VERSION = "0.1.0"
 
-/** Ergebnis der statischen Analyse: Syntaxbaum (falls erstellbar) plus Diagnosen. */
-class AnalyseErgebnis(val programm: Programm?, val diagnosen: List<Diagnose>) {
+/** Ergebnis der statischen Analyse: Syntaxbaum, Symboltabelle und Diagnosen. */
+class AnalyseErgebnis(
+    val programm: Programm?,
+    val symbole: GlobaleSymbole?,
+    val diagnosen: List<Diagnose>,
+) {
     val erfolgreich: Boolean get() = programm != null && diagnosen.isEmpty()
 }
 
@@ -30,12 +37,12 @@ fun analysiere(quelle: String): AnalyseErgebnis {
         val tokens = Lexer(quelle).zerlege()
         Parser(tokens).parse()
     } catch (fehler: QuellFehler) {
-        return AnalyseErgebnis(null, listOf(fehler.diagnose))
+        return AnalyseErgebnis(null, null, listOf(fehler.diagnose))
     }
     val diagnosen = DiagnoseSammler()
     val symbole = Resolver(programm, diagnosen).auflösen()
     Typpruefer(programm, symbole, diagnosen).prüfe()
-    return AnalyseErgebnis(programm, diagnosen.diagnosen)
+    return AnalyseErgebnis(programm, symbole, diagnosen.diagnosen)
 }
 
 /** Analysiert und interpretiert Quelltext; nuetzlich fuer Tests. */
@@ -56,6 +63,7 @@ fun main(argumente: Array<String>) {
     when (argumente[0]) {
         "starte" -> befehlStarte(argumente)
         "prüfe", "pruefe" -> befehlPrüfe(argumente)
+        "übersetze", "uebersetze" -> befehlÜbersetze(argumente)
         "version" -> println("Edel $VERSION")
         "hilfe" -> hilfe()
         else -> {
@@ -116,6 +124,38 @@ private fun befehlPrüfe(argumente: Array<String>) {
     }
 }
 
+private fun befehlÜbersetze(argumente: Array<String>) {
+    val quelle = leseDatei(argumente)
+    val ergebnis = analysiere(quelle)
+    if (ergebnis.diagnosen.isNotEmpty()) {
+        druckeDiagnosen(ergebnis.diagnosen)
+        exitProcess(1)
+    }
+    val programm = ergebnis.programm!!
+    val start = programm.deklarationen.filterIsInstance<FunktionDeklaration>()
+        .firstOrNull { it.name == "start" }
+    if (start == null || start.parameter.isNotEmpty()) {
+        System.err.println("Fehler: Das Programm braucht eine parameterlose Funktion 'start'.")
+        exitProcess(1)
+    }
+    val quelldatei = File(argumente[1]).absoluteFile
+    val klassenname = quelldatei.nameWithoutExtension
+    try {
+        val bytes = Bytecodeerzeuger(programm, ergebnis.symbole!!, klassenname).kompiliere()
+        val zieldatei = File(quelldatei.parentFile, "$klassenname.class")
+        zieldatei.writeBytes(bytes)
+        println("Erzeugt: ${zieldatei.path}")
+        println("Ausfuehren mit:  java -cp \"${quelldatei.parent}\" $klassenname")
+    } catch (fehler: NichtUnterstützt) {
+        System.err.println(fehler.diagnose.formatiert())
+        System.err.println(
+            "Das Bytecode-Backend deckt erst den Sprachkern ab. " +
+                "Dieses Programm laeuft weiterhin mit 'edel starte'.",
+        )
+        exitProcess(1)
+    }
+}
+
 private fun druckeDiagnosen(diagnosen: List<Diagnose>) {
     for (diagnose in diagnosen) {
         System.err.println(diagnose.formatiert())
@@ -130,10 +170,11 @@ private fun hilfe() {
         Edel $VERSION - eine Programmiersprache mit deutschen Schluesselwoertern.
 
         Aufruf:
-          edel starte <datei.edel>   Programm typpruefen und ausfuehren
-          edel prüfe  <datei.edel>   Programm nur typpruefen
-          edel version               Versionsnummer anzeigen
-          edel hilfe                  diese Hilfe anzeigen
+          edel starte    <datei.edel>   Programm typpruefen und ausfuehren
+          edel prüfe     <datei.edel>   Programm nur typpruefen
+          edel übersetze <datei.edel>   Programm zu einer JVM-.class-Datei uebersetzen
+          edel version                  Versionsnummer anzeigen
+          edel hilfe                     diese Hilfe anzeigen
         """.trimIndent(),
     )
 }

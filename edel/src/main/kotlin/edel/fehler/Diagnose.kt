@@ -26,3 +26,9 @@ class QuellFehler(val diagnose: Diagnose) : RuntimeException(diagnose.formatiert
 
 /** Wird bei Fehlern zur Laufzeit des Interpreters geworfen. */
 class LaufzeitFehler(meldung: String) : RuntimeException(meldung)
+
+/**
+ * Wird geworfen, wenn das Bytecode-Backend auf eine Sprachfunktion trifft, die
+ * es (noch) nicht unterstuetzt. Das Programm bleibt mit `edel starte` lauffaehig.
+ */
+class NichtUnterstützt(val diagnose: Diagnose) : RuntimeException(diagnose.formatiert())

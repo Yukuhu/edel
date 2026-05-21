@@ -1,0 +1,22 @@
+// Vom Bytecode-Backend uebersetzbar: nur Funktionen, Grundtypen, Kontrollfluss.
+
+funktion fib(n: Ganzzahl): Ganzzahl {
+    wenn n < 2 {
+        zurück n
+    }
+    zurück fib(n - 1) + fib(n - 2)
+}
+
+funktion gerade(n: Ganzzahl): Wahrheit {
+    zurück n % 2 == 0
+}
+
+funktion start() {
+    für i von 0 bis 10 {
+        sei art = wähle gerade(i) {
+            fall wahr -> "gerade"
+            sonst -> "ungerade"
+        }
+        drucke("fib(" + i + ") = " + fib(i) + "  (" + art + ")")
+    }
+}
