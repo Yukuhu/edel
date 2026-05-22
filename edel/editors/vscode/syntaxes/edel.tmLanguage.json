@@ -1,0 +1,109 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Edel",
+  "scopeName": "source.edel",
+  "patterns": [
+    { "include": "#kommentare" },
+    { "include": "#zeichenketten" },
+    { "include": "#zeichen" },
+    { "include": "#zahlen" },
+    { "include": "#schluesselwoerter" },
+    { "include": "#konstanten" },
+    { "include": "#eingebauteTypen" },
+    { "include": "#eingebauteFunktionen" },
+    { "include": "#operatoren" },
+    { "include": "#funktionsaufruf" },
+    { "include": "#typnamen" }
+  ],
+  "repository": {
+    "kommentare": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.edel",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.edel",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "zeichenketten": {
+      "name": "string.quoted.double.edel",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.edel",
+          "match": "\\\\."
+        }
+      ]
+    },
+    "zeichen": {
+      "name": "string.quoted.single.edel",
+      "begin": "'",
+      "end": "'",
+      "patterns": [
+        {
+          "name": "constant.character.escape.edel",
+          "match": "\\\\."
+        }
+      ]
+    },
+    "zahlen": {
+      "name": "constant.numeric.edel",
+      "match": "\\b\\d+(\\.\\d+)?\\b"
+    },
+    "schluesselwoerter": {
+      "patterns": [
+        {
+          "name": "keyword.control.edel",
+          "match": "(?<![\\p{L}\\p{N}_])(wenn|sonst|solange|für|in|von|bis|brich|weiter|wähle|fall|zurück)(?![\\p{L}\\p{N}_])"
+        },
+        {
+          "name": "storage.type.edel",
+          "match": "(?<![\\p{L}\\p{N}_])(funktion|klasse|datensatz|aufzählung|schnittstelle|sei|ver)(?![\\p{L}\\p{N}_])"
+        },
+        {
+          "name": "storage.modifier.edel",
+          "match": "(?<![\\p{L}\\p{N}_])(öffentlich|privat|geschützt|statisch|erweitert|erfüllt)(?![\\p{L}\\p{N}_])"
+        },
+        {
+          "name": "keyword.operator.word.edel",
+          "match": "(?<![\\p{L}\\p{N}_])(und|oder|nicht)(?![\\p{L}\\p{N}_])"
+        },
+        {
+          "name": "keyword.other.edel",
+          "match": "(?<![\\p{L}\\p{N}_])(neu|dies|importiere|paket)(?![\\p{L}\\p{N}_])"
+        }
+      ]
+    },
+    "konstanten": {
+      "name": "constant.language.edel",
+      "match": "(?<![\\p{L}\\p{N}_])(wahr|falsch|nichts)(?![\\p{L}\\p{N}_])"
+    },
+    "eingebauteTypen": {
+      "name": "support.type.edel",
+      "match": "(?<![\\p{L}\\p{N}_])(Ganzzahl|Kommazahl|Text|Wahrheit|Zeichen|Nichts|Liste|Abbildung|Paar)(?![\\p{L}\\p{N}_])"
+    },
+    "eingebauteFunktionen": {
+      "name": "support.function.builtin.edel",
+      "match": "(?<![\\p{L}\\p{N}_])(drucke|lies|länge)(?![\\p{L}\\p{N}_])"
+    },
+    "operatoren": {
+      "name": "keyword.operator.edel",
+      "match": "->|\\?\\.|\\?:|!!|==|!=|<=|>=|[-+*/%=<>?]"
+    },
+    "funktionsaufruf": {
+      "match": "([\\p{L}_][\\p{L}\\p{N}_]*)\\s*(?=\\()",
+      "captures": {
+        "1": { "name": "entity.name.function.edel" }
+      }
+    },
+    "typnamen": {
+      "name": "entity.name.type.edel",
+      "match": "(?<![\\p{L}\\p{N}_])[A-ZÄÖÜ][\\p{L}\\p{N}_]*(?![\\p{L}\\p{N}_])"
+    }
+  }
+}

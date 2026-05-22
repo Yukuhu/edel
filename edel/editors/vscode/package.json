@@ -1,0 +1,63 @@
+{
+  "name": "edel",
+  "displayName": "Edel",
+  "description": "Sprachunterstuetzung fuer Edel: Syntaxhervorhebung, Diagnosen, Hover, Navigation und Vervollstaendigung.",
+  "version": "0.1.0",
+  "publisher": "edel-lang",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.84.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:edel"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "edel",
+        "aliases": [
+          "Edel",
+          "edel"
+        ],
+        "extensions": [
+          ".edel"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "edel",
+        "scopeName": "source.edel",
+        "path": "./syntaxes/edel.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Edel",
+      "properties": {
+        "edel.server.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Den Edel-Sprachserver starten (Diagnosen, Hover, Navigation, Vervollstaendigung)."
+        },
+        "edel.server.jar": {
+          "type": "string",
+          "default": "",
+          "description": "Pfad zu edel-lsp.jar. Leer = im Arbeitsordner unter build/libs/edel-lsp.jar suchen."
+        },
+        "edel.java.home": {
+          "type": "string",
+          "default": "",
+          "description": "JDK-Verzeichnis fuer den Sprachserver. Leer = 'java' aus dem PATH bzw. JAVA_HOME."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}

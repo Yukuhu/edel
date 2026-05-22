@@ -15,11 +15,24 @@ repositories {
     mavenCentral()
 }
 
+// Eigener Quellsatz fuer den Sprachserver (LSP). Er haengt vom Kompilat des
+// Hauptquellsatzes ab, wird aber getrennt uebersetzt und verpackt -- so geraet
+// die lsp4j-Abhaengigkeit nicht in das native edel-Werkzeug.
+sourceSets {
+    create("lsp") {
+        compileClasspath += sourceSets["main"].output
+        runtimeClasspath += sourceSets["main"].output
+    }
+}
+
 dependencies {
     testImplementation(kotlin("test"))
     testImplementation(platform("org.junit:junit-bom:5.11.4"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+
+    // Eclipse LSP4J: die Standard-Bibliothek fuer das Language Server Protocol.
+    "lspImplementation"("org.eclipse.lsp4j:org.eclipse.lsp4j:1.0.0")
 }
 
 kotlin {
@@ -84,6 +97,38 @@ tasks.register<Jar>("fatJar") {
 
 tasks.named("build") {
     dependsOn("fatJar")
+}
+
+// ---------------------------------------------------------------------------
+// Sprachserver (LSP) als eigenstaendiges Jar
+// ---------------------------------------------------------------------------
+// Buendelt Compiler-Kern, Sprachserver und lsp4j zu edel-lsp.jar. Der Server
+// laeuft als JVM-Prozess (`java -jar edel-lsp.jar`) und spricht ueber stdin/stdout.
+tasks.register<Jar>("lspJar") {
+    group = "build"
+    description = "Baut den Edel-Sprachserver (LSP) als eigenstaendiges edel-lsp.jar."
+    archiveFileName = "edel-lsp.jar"
+    destinationDirectory = layout.buildDirectory.dir("libs")
+    manifest {
+        attributes(
+            "Main-Class" to "edel.lsp.SprachserverKt",
+            "Implementation-Title" to "Edel Language Server",
+            "Implementation-Version" to project.version.toString(),
+        )
+    }
+    isReproducibleFileOrder = true
+    isPreserveFileTimestamps = false
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    exclude("META-INF/*.SF", "META-INF/*.DSA", "META-INF/*.RSA", "META-INF/SIG-*")
+    exclude("module-info.class", "META-INF/versions/*/module-info.class")
+    from(sourceSets["main"].output)
+    from(sourceSets["lsp"].output)
+    dependsOn(configurations["lspRuntimeClasspath"])
+    from({
+        configurations["lspRuntimeClasspath"]
+            .filter { it.name.endsWith("jar") }
+            .map { zipTree(it) }
+    })
 }
 
 // ---------------------------------------------------------------------------

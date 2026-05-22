@@ -8,10 +8,13 @@ import edel.fehler.NichtUnterstützt
 import edel.fehler.QuellFehler
 import edel.laufzeit.Interpreter
 import edel.lexer.Lexer
+import edel.parser.Bezeichner
 import edel.parser.FunktionDeklaration
 import edel.parser.Parser
 import edel.parser.Programm
+import edel.parser.SeiAnweisung
 import edel.semantik.GlobaleSymbole
+import edel.semantik.Typ
 import edel.semantik.Parallelanalyse
 import edel.semantik.Parallelplan
 import edel.semantik.Resolver
@@ -29,6 +32,10 @@ class AnalyseErgebnis(
     val symbole: GlobaleSymbole?,
     val parallelplan: Parallelplan?,
     val diagnosen: List<Diagnose>,
+    /** Statischer Typ jeder Namensverwendung (fuer Editor-Funktionen wie Hover). */
+    val bezeichnerTypen: Map<Bezeichner, Typ> = emptyMap(),
+    /** Statischer Typ jeder `sei`-/`ver`-Bindung. */
+    val bindungsTypen: Map<SeiAnweisung, Typ> = emptyMap(),
 ) {
     val erfolgreich: Boolean get() = programm != null && diagnosen.isEmpty()
 }
@@ -56,7 +63,10 @@ fun analysiere(quelle: String): AnalyseErgebnis {
             typpruefer.binärTypen, typpruefer.bindungsTypen,
         ).analysiere()
     }
-    return AnalyseErgebnis(programm, symbole, parallelplan, diagnosen.diagnosen)
+    return AnalyseErgebnis(
+        programm, symbole, parallelplan, diagnosen.diagnosen,
+        typpruefer.bezeichnerTypen, typpruefer.bindungsTypen,
+    )
 }
 
 /** Analysiert und interpretiert Quelltext; nuetzlich fuer Tests. */

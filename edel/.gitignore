@@ -4,6 +4,11 @@ build/
 .idea/
 *.iml
 
+# VS-Code-Erweiterung: Abhaengigkeiten und Paketdateien nicht versionieren.
+editors/vscode/node_modules/
+editors/vscode/server/
+*.vsix
+
 # In beispiele/ nur Quell- und Erwartungsdateien versionieren
 # (erzeugte .class-Dateien und native Programme bleiben aussen vor).
 beispiele/*
