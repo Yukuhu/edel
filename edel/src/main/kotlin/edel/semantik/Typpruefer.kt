@@ -757,6 +757,7 @@ class Typpruefer(
         val signatur: FunktionsTyp? = when (basis) {
             is KlassenTyp -> basis.findeMethode(ziel.feld)
                 ?: (basis.findeFeld(ziel.feld)?.typ as? FunktionsTyp)
+            is SchnittstellenTyp -> basis.methoden[ziel.feld]
             is DatensatzTyp -> basis.felder[ziel.feld] as? FunktionsTyp
             else -> eingebauteMethode(basis, ziel.feld)
         }

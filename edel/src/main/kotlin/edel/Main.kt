@@ -191,42 +191,45 @@ private fun befehlPrüfe(argumente: Array<String>) {
     }
 }
 
-/** Uebersetzt die Quelldatei zu JVM-Bytecode und liefert (Quelldatei, Klassenbytes). */
-private fun kompiliereZuBytecode(argumente: Array<String>): Pair<File, ByteArray> {
+/** Uebersetzt die Quelldatei zu JVM-Bytecode und liefert (Quelldatei, Klassenname -> Bytes). */
+private fun kompiliereZuBytecode(argumente: Array<String>): Pair<File, Map<String, ByteArray>> {
     val ergebnis = analysiereDateiOderBeende(argumente)
     prüfeStartVorhanden(ergebnis.programm!!)
     val quelldatei = File(argumente[1]).absoluteFile
     val klassenname = quelldatei.nameWithoutExtension
-    val bytes = try {
+    val klassen = try {
         Bytecodeerzeuger(
             ergebnis.programm, ergebnis.symbole!!, klassenname, ergebnis.parallelplan!!,
         ).kompiliere()
     } catch (fehler: NichtUnterstützt) {
         System.err.println(fehler.diagnose.formatiert())
         System.err.println(
-            "Das Bytecode-Backend deckt erst den Sprachkern ab. " +
+            "Das Bytecode-Backend deckt noch nicht den vollen Sprachumfang ab. " +
                 "Dieses Programm laeuft weiterhin mit 'edel starte'.",
         )
         exitProcess(1)
     }
-    return quelldatei to bytes
+    return quelldatei to klassen
 }
 
 private fun befehlÜbersetze(argumente: Array<String>) {
-    val (quelldatei, bytes) = kompiliereZuBytecode(argumente)
-    val klassenname = quelldatei.nameWithoutExtension
-    val zieldatei = File(quelldatei.parentFile, "$klassenname.class")
-    zieldatei.writeBytes(bytes)
-    println("Erzeugt: ${zieldatei.path}")
-    println("Ausfuehren mit:  java -cp \"${quelldatei.parent}\" $klassenname")
+    val (quelldatei, klassen) = kompiliereZuBytecode(argumente)
+    val hauptklasse = quelldatei.nameWithoutExtension
+    for ((name, bytes) in klassen) {
+        File(quelldatei.parentFile, "$name.class").writeBytes(bytes)
+    }
+    println("Erzeugt: ${klassen.keys.joinToString(", ") { "$it.class" }}")
+    println("Ausfuehren mit:  java -cp \"${quelldatei.parent}\" $hauptklasse")
 }
 
 private fun befehlBinär(argumente: Array<String>) {
-    val (quelldatei, bytes) = kompiliereZuBytecode(argumente)
+    val (quelldatei, klassen) = kompiliereZuBytecode(argumente)
     val klassenname = quelldatei.nameWithoutExtension
     val arbeitsverzeichnis = Files.createTempDirectory("edel-binaer").toFile()
     try {
-        File(arbeitsverzeichnis, "$klassenname.class").writeBytes(bytes)
+        for ((name, bytes) in klassen) {
+            File(arbeitsverzeichnis, "$name.class").writeBytes(bytes)
+        }
         val zieldatei = File(quelldatei.parentFile, klassenname)
         val nativeImage = findeNativeImage()
         println("Uebersetze '${quelldatei.name}' mit GraalVM native-image ...")

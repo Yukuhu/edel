@@ -26,9 +26,13 @@ import java.lang.constant.MethodTypeDesc
  *
  * Unterstuetzt werden Funktionen, native Grundtypen (`Ganzzahl`->`long`,
  * `Kommazahl`->`double`, `Wahrheit`->`boolean`, `Zeichen`->`char`,
- * `Text`->`String`), saemtlicher Kontrollfluss, Rekursion und `wähle` ueber
- * Grundwerte. Klassen, Datensaetze, Aufzaehlungen, Lambdas und Sammlungen
- * werden mit [NichtUnterstützt] abgelehnt — dafuer bleibt der Interpreter.
+ * `Text`->`String`), Datensaetze (`datensatz`->eigene Klasse), saemtlicher
+ * Kontrollfluss, Rekursion und `wähle` ueber Grundwerte. Klassen,
+ * Aufzaehlungen, Lambdas und Sammlungen werden mit [NichtUnterstützt]
+ * abgelehnt — dafuer bleibt der Interpreter.
+ *
+ * [kompiliere] liefert eine Abbildung Klassenname -> Bytes: die Hauptklasse
+ * sowie je eine Klasse pro `datensatz`.
  */
 class Bytecodeerzeuger(
     private val programm: Programm,
@@ -36,16 +40,24 @@ class Bytecodeerzeuger(
     private val klassenname: String,
     private val parallelplan: Parallelplan = Parallelplan(emptyMap()),
 ) {
-    // Nicht-nullbare Grundarten und ihre nullbaren (geboxten) Gegenstuecke.
+    // Nicht-nullbare Grundarten, ihre nullbaren (geboxten) Gegenstuecke sowie
+    // OBJEKT fuer Referenzen auf Datensatz-Klassen.
     private enum class Art {
         GANZ, KOMMA, WAHR, ZEICH, TEXT,
         N_GANZ, N_KOMMA, N_WAHR, N_ZEICH, N_TEXT,
-        NICHTS,
+        NICHTS, OBJEKT,
     }
     private enum class Vgl { EQ, NE, LT, LE, GT, GE }
 
     private class Variable(val typ: Typ, val art: Art, val slot: Int)
     private class Schleife(val weiter: Label, val brich: Label)
+
+    /** Ein Lambda-Ausdruck samt gefangenen Variablen und ermitteltem Rueckgabetyp. */
+    private class LambdaInfo(
+        val lambda: LambdaAusdruck,
+        val gefangene: List<Pair<String, Typ>>,
+        val rückgabe: Typ,
+    )
 
     private val selbst: ClassDesc = ClassDesc.of(klassenname)
 
@@ -55,6 +67,9 @@ class Bytecodeerzeuger(
     private val bereiche = ArrayDeque<HashMap<String, Variable>>()
     private val schleifen = ArrayDeque<Schleife>()
     private var rückgabeTyp: Typ = NichtsTyp
+
+    // Die Klasse, deren Methode/Konstruktor gerade erzeugt wird (fuer `dies`).
+    private var aktuelleKlasse: KlassenTyp? = null
 
     // Parallel reduzierbare `für von bis`-Schleifen mit genau einem Akkumulator,
     // jeweils mit einem eindeutigen Index fuer die erzeugte `beitrag$n`-Methode.
@@ -66,18 +81,19 @@ class Bytecodeerzeuger(
     // Bindungen nebenlaeufiger `sei`-Gruppen, je mit Index fuer ihre `gruppe$n`-Methode.
     private var gruppenMethoden: Map<SeiAnweisung, Int> = emptyMap()
 
+    // Lambda-Ausdruecke in Erkennungsreihenfolge; der Listenindex ist die Methodennummer.
+    private val lambdaListe = ArrayList<LambdaInfo>()
+    private val lambdaNummer = HashMap<LambdaAusdruck, Int>()
+
+    // Vorkommende Stelligkeiten von Funktionswerten (je eine EdelFunktionN-Schnittstelle).
+    private val funktionsArten = sortedSetOf<Int>()
+
+    // Wird gesetzt, sobald ein `Paar` vorkommt: dann wird die Klasse EdelPaar erzeugt.
+    private var brauchtPaar = false
+
     // ---- Einstieg -----------------------------------------------------------
 
-    fun kompiliere(): ByteArray {
-        for (d in programm.deklarationen) {
-            if (d !is FunktionDeklaration && d !is ImportDeklaration && d !is PaketDeklaration) {
-                ablehnen(
-                    "Das Bytecode-Backend (Kern) unterstuetzt noch keine Klassen, Datensaetze, " +
-                        "Aufzaehlungen oder Schnittstellen — bitte 'edel starte' verwenden",
-                    d.position,
-                )
-            }
-        }
+    fun kompiliere(): Map<String, ByteArray> {
         val funktionen = programm.deklarationen.filterIsInstance<FunktionDeklaration>()
 
         // Parallel reduzierbare Schleifen erfassen (genau ein Ganzzahl-Akkumulator).
@@ -117,7 +133,20 @@ class Bytecodeerzeuger(
         }
         gruppenMethoden = gruppenIndex
 
-        return ClassFile.of().build(selbst) { clb ->
+        // Zuerst die benutzerdefinierten Typen (ihre Methoden koennen Lambdas enthalten,
+        // deren Implementierungsmethoden auf der Hauptklasse landen).
+        val klassen = LinkedHashMap<String, ByteArray>()
+        for (d in programm.deklarationen) {
+            when (d) {
+                is DatensatzDeklaration -> klassen[d.name] = erzeugeDatensatz(d)
+                is KlasseDeklaration -> klassen[d.name] = erzeugeKlasse(d)
+                is AufzählungDeklaration -> klassen[d.name] = erzeugeAufzählung(d)
+                is SchnittstelleDeklaration -> klassen[d.name] = erzeugeSchnittstelle(d)
+                else -> {}
+            }
+        }
+
+        klassen[klassenname] = ClassFile.of().build(selbst) { clb ->
             clb.withFlags(ClassFile.ACC_PUBLIC or ClassFile.ACC_FINAL)
             // Einsprungpunkt: main ruft die Edel-Funktion start auf.
             clb.withMethodBody(
@@ -196,10 +225,605 @@ class Bytecodeerzeuger(
                     )
                 }
             }
+            // Je eine 'edelLambda'-Methode pro Lambda-Ausdruck (sein uebersetzter Rumpf).
+            // Die Liste waechst, waehrend die obigen Ruempfe erzeugt werden.
+            var idx = 0
+            while (idx < lambdaListe.size) {
+                val info = lambdaListe[idx]
+                val nummer = idx
+                clb.withMethodBody(
+                    "edelLambda$$nummer", lambdaImplDeskriptor(info),
+                    ClassFile.ACC_PUBLIC or ClassFile.ACC_STATIC,
+                ) { code ->
+                    cob = code
+                    erzeugeLambdaImpl(info)
+                }
+                idx++
+            }
+        }
+
+        // Funktionale Schnittstellen fuer jede vorkommende Lambda-Stelligkeit.
+        for (stelligkeit in funktionsArten) {
+            klassen["EdelFunktion$stelligkeit"] = erzeugeFunktionsSchnittstelle(stelligkeit)
+        }
+        // Die Paar-Klasse, falls `Paar` vorkommt.
+        if (brauchtPaar) {
+            klassen["EdelPaar"] = erzeugeEdelPaar()
+        }
+        return klassen
+    }
+
+    // ---- Datensaetze --------------------------------------------------------
+
+    /**
+     * Erzeugt fuer einen `datensatz` eine eigene `.class`: oeffentliche `final`
+     * Felder, einen Konstruktor, der sie belegt, und ein `toString`, das die
+     * Darstellung des Interpreters (`Name(feld, feld)`) nachbildet.
+     */
+    private fun erzeugeDatensatz(d: DatensatzDeklaration): ByteArray {
+        val ziel = ClassDesc.of(d.name)
+        val felder = d.felder.map { it.name to symbole.auflöser.auflöse(it.typ) }
+        for ((_, typ) in felder) {
+            if (typ is NullbarTyp) {
+                ablehnen(
+                    "Nullbare Datensatzfelder werden vom Bytecode-Backend noch nicht unterstuetzt",
+                    d.position,
+                )
+            }
+        }
+        return ClassFile.of().build(ziel) { clb ->
+            clb.withFlags(ClassFile.ACC_PUBLIC or ClassFile.ACC_FINAL)
+            for ((name, typ) in felder) {
+                clb.withField(name, classDescVonTyp(typ), ClassFile.ACC_PUBLIC or ClassFile.ACC_FINAL)
+            }
+            val ktorDesc = MethodTypeDesc.of(
+                ConstantDescs.CD_void, felder.map { classDescVonTyp(it.second) },
+            )
+            clb.withMethodBody("<init>", ktorDesc, ClassFile.ACC_PUBLIC) { code ->
+                cob = code
+                code.aload(0)
+                code.invokespecial(
+                    ConstantDescs.CD_Object, "<init>", MethodTypeDesc.of(ConstantDescs.CD_void),
+                )
+                var slot = 1
+                for ((name, typ) in felder) {
+                    val art = artVon(typ, d.position)
+                    code.aload(0)
+                    lade(art, slot)
+                    code.putfield(ziel, name, classDescVonTyp(typ))
+                    slot += if (art == Art.GANZ || art == Art.KOMMA) 2 else 1
+                }
+                code.return_()
+            }
+            clb.withMethodBody("toString", MethodTypeDesc.of(CD_String), ClassFile.ACC_PUBLIC) { code ->
+                cob = code
+                erzeugeDatensatzToString(ziel, d.name, felder)
+            }
         }
     }
 
-    /** Erzeugt eine `gabel$n`-Methode: berechnet den linken Operanden einer Gabelung. */
+    /** Baut `Name(feld0, feld1, …)` ueber einen `StringBuilder` und gibt es zurueck. */
+    private fun erzeugeDatensatzToString(
+        ziel: ClassDesc,
+        name: String,
+        felder: List<Pair<String, Typ>>,
+    ) {
+        cob.new_(CD_StringBuilder)
+        cob.dup()
+        cob.invokespecial(CD_StringBuilder, "<init>", MethodTypeDesc.of(ConstantDescs.CD_void))
+        anhängenText("$name(")
+        felder.forEachIndexed { i, (feldname, typ) ->
+            if (i > 0) anhängenText(", ")
+            cob.aload(0)
+            cob.getfield(ziel, feldname, classDescVonTyp(typ))
+            anhängenFeld(artVon(typ, Position(0, 0)))
+        }
+        anhängenText(")")
+        cob.invokevirtual(CD_StringBuilder, "toString", MethodTypeDesc.of(CD_String))
+        cob.areturn()
+    }
+
+    /** Haengt eine Textkonstante an den `StringBuilder` auf dem Stapel an. */
+    private fun anhängenText(text: String) {
+        ladeText(text)
+        cob.invokevirtual(CD_StringBuilder, "append", MethodTypeDesc.of(CD_StringBuilder, CD_String))
+    }
+
+    /** Haengt den Wert auf dem Stapel (Art [art]) an den darunterliegenden `StringBuilder` an. */
+    private fun anhängenFeld(art: Art) {
+        val typDesc = when (art) {
+            Art.GANZ -> ConstantDescs.CD_long
+            Art.KOMMA -> ConstantDescs.CD_double
+            Art.ZEICH -> ConstantDescs.CD_char
+            Art.TEXT -> CD_String
+            Art.WAHR -> {
+                wahrheitswertZuText() // Wahrheitswert -> "wahr"/"falsch"
+                CD_String
+            }
+            else -> ConstantDescs.CD_Object // verschachtelte Datensaetze ueber toString
+        }
+        cob.invokevirtual(CD_StringBuilder, "append", MethodTypeDesc.of(CD_StringBuilder, typDesc))
+    }
+
+    // ---- Klassen ------------------------------------------------------------
+
+    private fun auflöse(typausdruck: Typausdruck): Typ = symbole.auflöser.auflöse(typausdruck)
+
+    /** Die Klassen-Deklarationskette von der Wurzel bis zu [d] (Wurzel zuerst). */
+    private fun klassenKette(d: KlasseDeklaration): List<KlasseDeklaration> {
+        val kette = ArrayDeque<KlasseDeklaration>()
+        var aktuell: KlasseDeklaration? = d
+        while (aktuell != null) {
+            kette.addFirst(aktuell)
+            aktuell = aktuell.oberklasse?.let { symbole.klassenDeklarationen[it] }
+        }
+        return kette.toList()
+    }
+
+    /** Alle Konstruktorfelder (ohne Initialwert) der ganzen Kette, Wurzel zuerst. */
+    private fun ktorFelderKette(d: KlasseDeklaration): List<FeldDeklaration> =
+        klassenKette(d).flatMap { k -> k.felder.filter { it.initialwert == null } }
+
+    /**
+     * Erzeugt fuer eine `klasse` eine eigene `.class`: Instanzfelder, einen
+     * Konstruktor (Felder ohne Initialwert werden Konstruktorparameter, geerbte
+     * zuerst), die Methoden und ein `toString`. Vererbung und Schnittstellen
+     * werden auf `extends`/`implements` der JVM abgebildet.
+     */
+    private fun erzeugeKlasse(d: KlasseDeklaration): ByteArray {
+        for (feld in d.felder) {
+            if (auflöse(feld.typ) is NullbarTyp) {
+                ablehnen(
+                    "Nullbare Klassenfelder werden vom Bytecode-Backend noch nicht unterstuetzt",
+                    feld.position,
+                )
+            }
+        }
+        val klassenTyp = symbole.typen.getValue(d.name) as KlassenTyp
+        val ziel = ClassDesc.of(d.name)
+        return ClassFile.of().build(ziel) { clb ->
+            clb.withFlags(ClassFile.ACC_PUBLIC) // nicht final: koennte erweitert werden
+            d.oberklasse?.let { clb.withSuperclass(ClassDesc.of(it)) }
+            if (d.schnittstellen.isNotEmpty()) {
+                clb.withInterfaceSymbols(d.schnittstellen.map { ClassDesc.of(it) })
+            }
+            for (feld in d.felder) { // nur die eigenen Felder; geerbte liegen in der Oberklasse
+                val flags = ClassFile.ACC_PUBLIC or
+                    (if (feld.wandelbar) 0 else ClassFile.ACC_FINAL)
+                clb.withField(feld.name, classDescVonTyp(auflöse(feld.typ)), flags)
+            }
+            val ktorDesc = MethodTypeDesc.of(
+                ConstantDescs.CD_void, ktorFelderKette(d).map { classDescVonTyp(auflöse(it.typ)) },
+            )
+            clb.withMethodBody("<init>", ktorDesc, ClassFile.ACC_PUBLIC) { code ->
+                cob = code
+                erzeugeKonstruktor(klassenTyp, ziel, d)
+            }
+            for (methode in d.methoden) {
+                clb.withMethodBody(
+                    methode.name, methodenDeskriptor(klassenTyp, methode.name), ClassFile.ACC_PUBLIC,
+                ) { code ->
+                    cob = code
+                    erzeugeMethode(klassenTyp, methode)
+                }
+            }
+            clb.withMethodBody("toString", MethodTypeDesc.of(CD_String), ClassFile.ACC_PUBLIC) { code ->
+                cob = code
+                erzeugeKlasseToString(ziel, d)
+            }
+        }
+    }
+
+    /**
+     * Konstruktor: ruft mit den geerbten Konstruktorfeldern den Oberklassen-
+     * Konstruktor auf, belegt dann die eigenen Konstruktorfelder und fuehrt
+     * zuletzt die eigenen Feld-Initialisierer aus.
+     */
+    private fun erzeugeKonstruktor(klassenTyp: KlassenTyp, ziel: ClassDesc, d: KlasseDeklaration) {
+        bereiche.clear()
+        schleifen.clear()
+        bereiche.addLast(HashMap())
+        aktuelleKlasse = klassenTyp
+        val geerbte = d.oberklasse
+            ?.let { ktorFelderKette(symbole.klassenDeklarationen.getValue(it)) }
+            ?: emptyList()
+        val eigeneKtor = d.felder.filter { it.initialwert == null }
+        val eigeneInit = d.felder.filter { it.initialwert != null }
+        val alle = geerbte + eigeneKtor
+        // Slot jedes Konstruktorparameters (dies = Slot 0).
+        val slots = IntArray(alle.size)
+        var slot = 1
+        alle.forEachIndexed { i, feld ->
+            slots[i] = slot
+            val art = artVon(auflöse(feld.typ), feld.position)
+            slot += if (art == Art.GANZ || art == Art.KOMMA) 2 else 1
+        }
+        nächsterSlot = slot
+
+        // super(geerbte Konstruktorfelder)
+        cob.aload(0)
+        for (i in geerbte.indices) {
+            lade(artVon(auflöse(geerbte[i].typ), geerbte[i].position), slots[i])
+        }
+        val oberklasse = d.oberklasse?.let { ClassDesc.of(it) } ?: ConstantDescs.CD_Object
+        cob.invokespecial(
+            oberklasse, "<init>",
+            MethodTypeDesc.of(ConstantDescs.CD_void, geerbte.map { classDescVonTyp(auflöse(it.typ)) }),
+        )
+        // eigene Konstruktorfelder belegen
+        for (i in geerbte.size until alle.size) {
+            val feld = alle[i]
+            val typ = auflöse(feld.typ)
+            cob.aload(0)
+            lade(artVon(typ, feld.position), slots[i])
+            cob.putfield(ziel, feld.name, classDescVonTyp(typ))
+        }
+        // eigene Initialisierer ausfuehren
+        for (feld in eigeneInit) {
+            val typ = auflöse(feld.typ)
+            cob.aload(0)
+            erzeugeMitTyp(feld.initialwert!!, typ)
+            cob.putfield(ziel, feld.name, classDescVonTyp(typ))
+        }
+        cob.return_()
+        aktuelleKlasse = null
+    }
+
+    /** Erzeugt den Rumpf einer Instanzmethode (Slot 0 = dies, Parameter ab Slot 1). */
+    private fun erzeugeMethode(klassenTyp: KlassenTyp, methode: FunktionDeklaration) {
+        nächsterSlot = 1
+        bereiche.clear()
+        schleifen.clear()
+        bereiche.addLast(HashMap())
+        aktuelleKlasse = klassenTyp
+        val signatur = klassenTyp.methoden.getValue(methode.name)
+        rückgabeTyp = signatur.rückgabe
+        methode.parameter.forEachIndexed { i, parameter ->
+            val typ = signatur.parameter[i]
+            val art = artVon(typ, parameter.position)
+            val slot = belegeSlot(art)
+            bereiche.last()[parameter.name] = Variable(typ, art, slot)
+        }
+        erzeugeBlock(methode.körper)
+        if (!terminiert(methode.körper)) {
+            if (rückgabeTyp == NichtsTyp) {
+                cob.return_()
+            } else {
+                val art = artVon(rückgabeTyp, methode.position)
+                standardwert(art)
+                rückgabeBefehl(art)
+            }
+        }
+        aktuelleKlasse = null
+    }
+
+    /**
+     * Baut `Name(feld=wert, …)` analog zur Darstellung des Interpreters: erst
+     * die Konstruktorfelder der ganzen Kette, dann die initialisierten Felder.
+     */
+    private fun erzeugeKlasseToString(ziel: ClassDesc, d: KlasseDeklaration) {
+        val kette = klassenKette(d)
+        val felder = kette.flatMap { k -> k.felder.filter { it.initialwert == null } } +
+            kette.flatMap { k -> k.felder.filter { it.initialwert != null } }
+        cob.new_(CD_StringBuilder)
+        cob.dup()
+        cob.invokespecial(CD_StringBuilder, "<init>", MethodTypeDesc.of(ConstantDescs.CD_void))
+        anhängenText("${d.name}(")
+        felder.forEachIndexed { i, feld ->
+            if (i > 0) anhängenText(", ")
+            anhängenText("${feld.name}=")
+            val typ = auflöse(feld.typ)
+            cob.aload(0)
+            cob.getfield(ziel, feld.name, classDescVonTyp(typ))
+            anhängenFeld(artVon(typ, feld.position))
+        }
+        anhängenText(")")
+        cob.invokevirtual(CD_StringBuilder, "toString", MethodTypeDesc.of(CD_String))
+        cob.areturn()
+    }
+
+    /** Der JVM-Methodendeskriptor einer Instanzmethode. */
+    private fun methodenDeskriptor(klassenTyp: KlassenTyp, name: String): MethodTypeDesc {
+        val signatur = klassenTyp.methoden.getValue(name)
+        val rückgabe = if (signatur.rückgabe == NichtsTyp) {
+            ConstantDescs.CD_void
+        } else {
+            classDescVonTyp(signatur.rückgabe)
+        }
+        return MethodTypeDesc.of(rückgabe, signatur.parameter.map { classDescVonTyp(it) })
+    }
+
+    // ---- Aufzaehlungen ------------------------------------------------------
+
+    /**
+     * Erzeugt fuer eine `aufzählung` eine eigene `.class`: je Variante eine
+     * `static final`-Instanz (Singleton), erzeugt im statischen Initialisierer.
+     * Gleichheit ist damit Referenzgleichheit; `toString` liefert `Typ.Variante`.
+     */
+    private fun erzeugeAufzählung(d: AufzählungDeklaration): ByteArray {
+        val ziel = ClassDesc.of(d.name)
+        return ClassFile.of().build(ziel) { clb ->
+            clb.withFlags(ClassFile.ACC_PUBLIC or ClassFile.ACC_FINAL)
+            for (variante in d.varianten) {
+                clb.withField(
+                    variante, ziel,
+                    ClassFile.ACC_PUBLIC or ClassFile.ACC_STATIC or ClassFile.ACC_FINAL,
+                )
+            }
+            clb.withField("name$", CD_String, ClassFile.ACC_PRIVATE or ClassFile.ACC_FINAL)
+            clb.withMethodBody(
+                "<init>", MethodTypeDesc.of(ConstantDescs.CD_void, CD_String), ClassFile.ACC_PRIVATE,
+            ) { code ->
+                code.aload(0)
+                code.invokespecial(
+                    ConstantDescs.CD_Object, "<init>", MethodTypeDesc.of(ConstantDescs.CD_void),
+                )
+                code.aload(0)
+                code.aload(1)
+                code.putfield(ziel, "name$", CD_String)
+                code.return_()
+            }
+            clb.withMethodBody(
+                "<clinit>", MethodTypeDesc.of(ConstantDescs.CD_void), ClassFile.ACC_STATIC,
+            ) { code ->
+                cob = code
+                for (variante in d.varianten) {
+                    code.new_(ziel)
+                    code.dup()
+                    ladeText(variante)
+                    code.invokespecial(
+                        ziel, "<init>", MethodTypeDesc.of(ConstantDescs.CD_void, CD_String),
+                    )
+                    code.putstatic(ziel, variante, ziel)
+                }
+                code.return_()
+            }
+            clb.withMethodBody("toString", MethodTypeDesc.of(CD_String), ClassFile.ACC_PUBLIC) { code ->
+                cob = code
+                ladeText("${d.name}.")
+                code.aload(0)
+                code.getfield(ziel, "name$", CD_String)
+                code.invokevirtual(CD_String, "concat", MethodTypeDesc.of(CD_String, CD_String))
+                code.areturn()
+            }
+        }
+    }
+
+    /** Liefert den Aufzaehlungstyp, falls [ausdruck] eine Variante `Typ.Variante` ist. */
+    private fun aufzählungsVariante(ausdruck: FeldzugriffAusdruck): AufzählungTyp? {
+        val ziel = ausdruck.ziel
+        if (ziel is Bezeichner && findeVariable(ziel.name) == null) {
+            val typ = symbole.typen[ziel.name]
+            if (typ is AufzählungTyp && ausdruck.feld in typ.varianten) return typ
+        }
+        return null
+    }
+
+    // ---- Schnittstellen -----------------------------------------------------
+
+    /** Erzeugt fuer eine `schnittstelle` eine JVM-Schnittstelle mit abstrakten Methoden. */
+    private fun erzeugeSchnittstelle(d: SchnittstelleDeklaration): ByteArray {
+        val ziel = ClassDesc.of(d.name)
+        return ClassFile.of().build(ziel) { clb ->
+            clb.withFlags(ClassFile.ACC_PUBLIC or ClassFile.ACC_INTERFACE or ClassFile.ACC_ABSTRACT)
+            for (m in d.methoden) {
+                val rückgabe = m.rückgabetyp?.let { classDescVonTyp(auflöse(it)) }
+                    ?: ConstantDescs.CD_void
+                val desc = MethodTypeDesc.of(
+                    rückgabe, m.parameter.map { classDescVonTyp(auflöse(it.typ)) },
+                )
+                clb.withMethod(m.name, desc, ClassFile.ACC_PUBLIC or ClassFile.ACC_ABSTRACT) { }
+            }
+        }
+    }
+
+    // ---- Lambdas ------------------------------------------------------------
+    //
+    // Ein Lambda wird zu einer `edelLambda$n`-Methode auf der Hauptklasse; der
+    // Ausdruck selbst erzeugt per `invokedynamic` (LambdaMetafactory) eine
+    // Instanz der funktionalen Schnittstelle `EdelFunktionN`. Werte werden an
+    // der Schnittstelle als `Object` uebergeben (geboxt), damit dieselbe
+    // Schnittstelle fuer jede Signatur derselben Stelligkeit dient.
+
+    private fun funktionsSchnittstelle(stelligkeit: Int): ClassDesc {
+        funktionsArten.add(stelligkeit)
+        return ClassDesc.of("EdelFunktion$stelligkeit")
+    }
+
+    /** Ermittelt den Rueckgabetyp eines Lambdas (Typ des Rumpfes mit Parametern im Geltungsbereich). */
+    private fun lambdaRückgabe(lambda: LambdaAusdruck): Typ {
+        bereiche.addLast(HashMap())
+        for (p in lambda.parameter) {
+            val typ = auflöse(p.typ)
+            bereiche.last()[p.name] = Variable(typ, artVon(typ, p.position), -1)
+        }
+        val rück = typVon(lambda.körper)
+        bereiche.removeLast()
+        return rück
+    }
+
+    /** Erzeugt einen Lambda-Ausdruck: gefangene Werte laden, dann `invokedynamic`. */
+    private fun erzeugeLambda(lambda: LambdaAusdruck) {
+        val bezeichner = mutableListOf<Bezeichner>()
+        val verschachtelt = mutableListOf<LambdaAusdruck>()
+        sammleAusdruck(lambda.körper, bezeichner, verschachtelt)
+        if (verschachtelt.isNotEmpty()) {
+            ablehnen(
+                "Verschachtelte Lambdas werden vom Bytecode-Backend noch nicht unterstuetzt",
+                lambda.position,
+            )
+        }
+        val rückgabe = lambdaRückgabe(lambda)
+        if (rückgabe == NichtsTyp) {
+            ablehnen(
+                "Lambdas ohne Rueckgabewert werden vom Bytecode-Backend noch nicht unterstuetzt",
+                lambda.position,
+            )
+        }
+        // Gefangene Variablen: im Rumpf benutzte Namen, die auf eine umschliessende
+        // lokale Variable verweisen (keine Parameter, keine globalen Funktionen).
+        val parameterNamen = lambda.parameter.mapTo(HashSet()) { it.name }
+        val gefangen = LinkedHashMap<String, Variable>()
+        for (b in bezeichner) {
+            if (b.name in parameterNamen || b.name in gefangen) continue
+            findeVariable(b.name)?.let { gefangen[b.name] = it }
+        }
+        val nummer = lambdaListe.size
+        lambdaNummer[lambda] = nummer
+        lambdaListe.add(LambdaInfo(lambda, gefangen.map { it.key to it.value.typ }, rückgabe))
+
+        for (variable in gefangen.values) lade(variable.art, variable.slot)
+        cob.invokedynamic(
+            lambdaAufrufstelle(
+                nummer, gefangen.values.map { classDescVonTyp(it.typ) }, lambda.parameter.size,
+            ),
+        )
+    }
+
+    private fun lambdaAufrufstelle(
+        nummer: Int,
+        gefangenDescs: List<ClassDesc>,
+        stelligkeit: Int,
+    ): DynamicCallSiteDesc {
+        val objekte = List(stelligkeit) { ConstantDescs.CD_Object }
+        val samTyp = MethodTypeDesc.of(ConstantDescs.CD_Object, objekte)
+        val implTyp = MethodTypeDesc.of(ConstantDescs.CD_Object, gefangenDescs + objekte)
+        val impl = MethodHandleDesc.ofMethod(
+            DirectMethodHandleDesc.Kind.STATIC, selbst, "edelLambda$$nummer", implTyp,
+        )
+        val fabrikTyp = MethodTypeDesc.of(funktionsSchnittstelle(stelligkeit), gefangenDescs)
+        return DynamicCallSiteDesc.of(METAFACTORY, "anwenden", fabrikTyp, samTyp, impl, samTyp)
+    }
+
+    private fun lambdaImplDeskriptor(info: LambdaInfo): MethodTypeDesc {
+        val gefangen = info.gefangene.map { classDescVonTyp(it.second) }
+        val objekte = List(info.lambda.parameter.size) { ConstantDescs.CD_Object }
+        return MethodTypeDesc.of(ConstantDescs.CD_Object, gefangen + objekte)
+    }
+
+    /** Erzeugt den Rumpf einer `edelLambda$n`-Methode. */
+    private fun erzeugeLambdaImpl(info: LambdaInfo) {
+        bereiche.clear()
+        schleifen.clear()
+        bereiche.addLast(HashMap())
+        aktuelleKlasse = null
+        nächsterSlot = 0
+        for ((name, typ) in info.gefangene) {
+            val art = artVon(typ, info.lambda.position)
+            bereiche.last()[name] = Variable(typ, art, belegeSlot(art))
+        }
+        // Lambda-Parameter kommen als Object; in echt-typisierte lokale Variablen auspacken.
+        val objektSlots = info.lambda.parameter.map { belegeSlot(Art.OBJEKT) }
+        info.lambda.parameter.forEachIndexed { i, p ->
+            val typ = auflöse(p.typ)
+            val art = artVon(typ, p.position)
+            cob.aload(objektSlots[i])
+            entObjektiviere(typ)
+            val slot = belegeSlot(art)
+            speichere(art, slot)
+            bereiche.last()[p.name] = Variable(typ, art, slot)
+        }
+        rückgabeTyp = info.rückgabe
+        erzeugeMitTyp(info.lambda.körper, info.rückgabe)
+        objektiviere(artVon(info.rückgabe, info.lambda.position))
+        cob.areturn()
+    }
+
+    private fun erzeugeFunktionsSchnittstelle(stelligkeit: Int): ByteArray {
+        val ziel = ClassDesc.of("EdelFunktion$stelligkeit")
+        val samTyp = MethodTypeDesc.of(
+            ConstantDescs.CD_Object, List(stelligkeit) { ConstantDescs.CD_Object },
+        )
+        return ClassFile.of().build(ziel) { clb ->
+            clb.withFlags(ClassFile.ACC_PUBLIC or ClassFile.ACC_INTERFACE or ClassFile.ACC_ABSTRACT)
+            clb.withMethod("anwenden", samTyp, ClassFile.ACC_PUBLIC or ClassFile.ACC_ABSTRACT) { }
+        }
+    }
+
+    /** Boxt einen Grundwert auf dem Stapel in ein `Object`. */
+    private fun objektiviere(art: Art) {
+        when (art) {
+            Art.GANZ -> cob.invokestatic(
+                CD_Long, "valueOf", MethodTypeDesc.of(CD_Long, ConstantDescs.CD_long),
+            )
+            Art.KOMMA -> cob.invokestatic(
+                CD_Double, "valueOf", MethodTypeDesc.of(CD_Double, ConstantDescs.CD_double),
+            )
+            Art.WAHR -> cob.invokestatic(
+                CD_Boolean, "valueOf", MethodTypeDesc.of(CD_Boolean, ConstantDescs.CD_boolean),
+            )
+            Art.ZEICH -> cob.invokestatic(
+                CD_Character, "valueOf", MethodTypeDesc.of(CD_Character, ConstantDescs.CD_char),
+            )
+            else -> {} // bereits eine Referenz
+        }
+    }
+
+    /** Wandelt ein `Object` auf dem Stapel in einen Wert des Typs [typ] um. */
+    private fun entObjektiviere(typ: Typ) {
+        when (artVon(typ, Position(0, 0))) {
+            Art.GANZ -> {
+                cob.checkcast(CD_Number)
+                cob.invokevirtual(CD_Number, "longValue", MethodTypeDesc.of(ConstantDescs.CD_long))
+            }
+            Art.KOMMA -> {
+                cob.checkcast(CD_Number)
+                cob.invokevirtual(CD_Number, "doubleValue", MethodTypeDesc.of(ConstantDescs.CD_double))
+            }
+            Art.WAHR -> {
+                cob.checkcast(CD_Boolean)
+                cob.invokevirtual(CD_Boolean, "booleanValue", MethodTypeDesc.of(ConstantDescs.CD_boolean))
+            }
+            Art.ZEICH -> {
+                cob.checkcast(CD_Character)
+                cob.invokevirtual(CD_Character, "charValue", MethodTypeDesc.of(ConstantDescs.CD_char))
+            }
+            Art.NICHTS -> {}
+            else -> cob.checkcast(classDescVonTyp(typ)) // Text, Objekte, nullbare Arten
+        }
+    }
+
+    /** Sammelt rekursiv alle Bezeichner und (verschachtelten) Lambdas eines Ausdrucks. */
+    private fun sammleAusdruck(
+        a: Ausdruck,
+        bezeichner: MutableList<Bezeichner>,
+        lambdas: MutableList<LambdaAusdruck>,
+    ) {
+        when (a) {
+            is Bezeichner -> bezeichner.add(a)
+            is LambdaAusdruck -> lambdas.add(a)
+            is UnärAusdruck -> sammleAusdruck(a.operand, bezeichner, lambdas)
+            is BinärAusdruck -> {
+                sammleAusdruck(a.links, bezeichner, lambdas)
+                sammleAusdruck(a.rechts, bezeichner, lambdas)
+            }
+            is AufrufAusdruck -> {
+                sammleAusdruck(a.ziel, bezeichner, lambdas)
+                a.argumente.forEach { sammleAusdruck(it, bezeichner, lambdas) }
+            }
+            is IndexAusdruck -> {
+                sammleAusdruck(a.ziel, bezeichner, lambdas)
+                sammleAusdruck(a.index, bezeichner, lambdas)
+            }
+            is FeldzugriffAusdruck -> sammleAusdruck(a.ziel, bezeichner, lambdas)
+            is ElvisAusdruck -> {
+                sammleAusdruck(a.links, bezeichner, lambdas)
+                sammleAusdruck(a.rechts, bezeichner, lambdas)
+            }
+            is NichtNullAusdruck -> sammleAusdruck(a.operand, bezeichner, lambdas)
+            is NeuAusdruck -> a.argumente.forEach { sammleAusdruck(it, bezeichner, lambdas) }
+            is WähleAusdruck -> {
+                sammleAusdruck(a.subjekt, bezeichner, lambdas)
+                a.fälle.forEach {
+                    sammleAusdruck(it.muster, bezeichner, lambdas)
+                    sammleAusdruck(it.ergebnis, bezeichner, lambdas)
+                }
+                sammleAusdruck(a.sonst, bezeichner, lambdas)
+            }
+            else -> {} // Literale, DiesAusdruck
+        }
+    }
+
     /**
      * Erzeugt eine Lieferant-Methode: berechnet [ausdruck] (Typ Ganzzahl) aus
      * den gefangenen Variablen. Basis fuer `gabel$n`- und `gruppe$n`-Methoden.
@@ -519,14 +1143,32 @@ class Bytecodeerzeuger(
             }
 
             is ZuweisungAnweisung -> {
-                val ziel = anweisung.ziel
-                if (ziel !is Bezeichner) {
-                    ablehnen("Nur Zuweisungen an Variablen werden unterstuetzt", ziel.position)
+                when (val ziel = anweisung.ziel) {
+                    is Bezeichner -> {
+                        val variable = findeVariable(ziel.name)
+                            ?: ablehnen("Unbekannte Variable: '${ziel.name}'", ziel.position)
+                        erzeugeMitTyp(anweisung.wert, variable.typ)
+                        speichere(variable.art, variable.slot)
+                    }
+                    is FeldzugriffAusdruck -> {
+                        if (ziel.sicher) {
+                            ablehnen(
+                                "Sicherer Feldzugriff '?.' wird vom Bytecode-Backend noch nicht unterstuetzt",
+                                ziel.position,
+                            )
+                        }
+                        val empfängerTyp = entnullt(typVon(ziel.ziel))
+                        val feldTyp = feldTypVon(empfängerTyp, ziel.feld, ziel.position)
+                        erzeugeAusdruck(ziel.ziel)
+                        erzeugeMitTyp(anweisung.wert, feldTyp)
+                        cob.putfield(ClassDesc.of(typname(empfängerTyp)), ziel.feld, classDescVonTyp(feldTyp))
+                    }
+                    is IndexAusdruck -> erzeugeIndexZuweisung(ziel, anweisung.wert)
+                    else -> ablehnen(
+                        "Nur Zuweisungen an Variablen, Felder oder Indizes werden unterstuetzt",
+                        ziel.position,
+                    )
                 }
-                val variable = findeVariable(ziel.name)
-                    ?: ablehnen("Unbekannte Variable: '${ziel.name}'", ziel.position)
-                erzeugeMitTyp(anweisung.wert, variable.typ)
-                speichere(variable.art, variable.slot)
             }
 
             is AusdruckAnweisung -> {
@@ -643,11 +1285,15 @@ class Bytecodeerzeuger(
     }
 
     private fun erzeugeFürIn(anweisung: FürInAnweisung) {
-        val iterierbar = typVon(anweisung.iterierbar)
+        val iterierbar = entnullt(typVon(anweisung.iterierbar))
+        if (iterierbar is ListeTyp) {
+            erzeugeFürInListe(anweisung, iterierbar)
+            return
+        }
         if (iterierbar != TextTyp) {
             ablehnen(
                 "'für ... in' ueber $iterierbar wird vom Bytecode-Backend noch nicht " +
-                    "unterstuetzt (nur ueber Text)",
+                    "unterstuetzt (nur ueber Text und Liste)",
                 anweisung.iterierbar.position,
             )
         }
@@ -687,6 +1333,41 @@ class Bytecodeerzeuger(
             cob.iinc(indexSlot, 1)
             cob.goto_(start)
         }
+        cob.labelBinding(ende)
+        bereiche.removeLast()
+    }
+
+    /** `für ... in liste`: Iteration ueber eine `java.util.List` per `Iterator`. */
+    private fun erzeugeFürInListe(anweisung: FürInAnweisung, listeTyp: ListeTyp) {
+        bereiche.addLast(HashMap())
+        val element = listeTyp.element
+        val elementArt = artVon(element, anweisung.position)
+        val itSlot = belegeSlot(Art.OBJEKT)
+        val variableSlot = belegeSlot(elementArt)
+        bereiche.last()[anweisung.variable] = Variable(element, elementArt, variableSlot)
+
+        erzeugeAusdruck(anweisung.iterierbar)
+        cob.invokeinterface(CD_List, "iterator", MethodTypeDesc.of(CD_Iterator))
+        cob.astore(itSlot)
+
+        val start = cob.newLabel()
+        val weiter = cob.newLabel()
+        val ende = cob.newLabel()
+        cob.labelBinding(start)
+        cob.aload(itSlot)
+        cob.invokeinterface(CD_Iterator, "hasNext", MethodTypeDesc.of(ConstantDescs.CD_boolean))
+        cob.ifeq(ende)
+        cob.aload(itSlot)
+        cob.invokeinterface(CD_Iterator, "next", MethodTypeDesc.of(ConstantDescs.CD_Object))
+        entObjektiviere(element)
+        speichere(elementArt, variableSlot)
+
+        schleifen.addLast(Schleife(weiter, ende))
+        erzeugeBlock(anweisung.körper)
+        schleifen.removeLast()
+
+        cob.labelBinding(weiter)
+        if (!terminiert(anweisung.körper)) cob.goto_(start)
         cob.labelBinding(ende)
         bereiche.removeLast()
     }
@@ -736,17 +1417,154 @@ class Bytecodeerzeuger(
             is ElvisAusdruck -> erzeugeElvis(ausdruck)
             is NichtNullAusdruck -> erzeugeNichtNull(ausdruck)
 
-            is DiesAusdruck ->
-                ablehnen("'dies' wird vom Bytecode-Backend nicht unterstuetzt", ausdruck.position)
-            is NeuAusdruck ->
-                ablehnen("'neu' wird vom Bytecode-Backend nicht unterstuetzt", ausdruck.position)
-            is LambdaAusdruck ->
-                ablehnen("Lambdas werden vom Bytecode-Backend nicht unterstuetzt", ausdruck.position)
-            is IndexAusdruck ->
-                ablehnen("Indexzugriff wird vom Bytecode-Backend nicht unterstuetzt", ausdruck.position)
-            is FeldzugriffAusdruck ->
-                ablehnen("Feldzugriff wird vom Bytecode-Backend nicht unterstuetzt", ausdruck.position)
+            is NeuAusdruck -> erzeugeNeu(ausdruck)
+            is FeldzugriffAusdruck -> erzeugeFeldzugriff(ausdruck)
+
+            is DiesAusdruck -> {
+                if (aktuelleKlasse == null) {
+                    ablehnen("'dies' ist nur in Methoden gueltig", ausdruck.position)
+                }
+                cob.aload(0)
+            }
+            is LambdaAusdruck -> erzeugeLambda(ausdruck)
+            is IndexAusdruck -> erzeugeIndex(ausdruck)
         }
+    }
+
+    /** Erzeugt `ziel[index]` fuer Liste, Abbildung oder Text. */
+    private fun erzeugeIndex(ausdruck: IndexAusdruck) {
+        when (val zielTyp = entnullt(typVon(ausdruck.ziel))) {
+            is ListeTyp -> {
+                erzeugeAusdruck(ausdruck.ziel)
+                erzeugeMitTyp(ausdruck.index, GanzzahlTyp)
+                cob.l2i()
+                cob.invokeinterface(
+                    CD_List, "get", MethodTypeDesc.of(ConstantDescs.CD_Object, ConstantDescs.CD_int),
+                )
+                entObjektiviere(zielTyp.element)
+            }
+            is AbbildungTyp -> {
+                erzeugeAusdruck(ausdruck.ziel)
+                erzeugeMitTyp(ausdruck.index, zielTyp.schlüssel)
+                objektiviere(artVon(zielTyp.schlüssel, ausdruck.position))
+                cob.invokeinterface(
+                    CD_Map, "get", MethodTypeDesc.of(ConstantDescs.CD_Object, ConstantDescs.CD_Object),
+                )
+                entObjektiviere(zielTyp.wert)
+            }
+            TextTyp -> {
+                erzeugeAusdruck(ausdruck.ziel)
+                erzeugeMitTyp(ausdruck.index, GanzzahlTyp)
+                cob.l2i()
+                cob.invokevirtual(
+                    CD_String, "charAt", MethodTypeDesc.of(ConstantDescs.CD_char, ConstantDescs.CD_int),
+                )
+            }
+            else -> ablehnen(
+                "Indexzugriff wird nur fuer Liste, Abbildung und Text unterstuetzt", ausdruck.position,
+            )
+        }
+    }
+
+    /** Erzeugt `ziel[index] = wert` fuer Liste und Abbildung. */
+    private fun erzeugeIndexZuweisung(ziel: IndexAusdruck, wert: Ausdruck) {
+        when (val zielTyp = entnullt(typVon(ziel.ziel))) {
+            is ListeTyp -> {
+                erzeugeAusdruck(ziel.ziel)
+                erzeugeMitTyp(ziel.index, GanzzahlTyp)
+                cob.l2i()
+                erzeugeMitTyp(wert, zielTyp.element)
+                objektiviere(artVon(zielTyp.element, ziel.position))
+                cob.invokeinterface(
+                    CD_List, "set",
+                    MethodTypeDesc.of(ConstantDescs.CD_Object, ConstantDescs.CD_int, ConstantDescs.CD_Object),
+                )
+                cob.pop()
+            }
+            is AbbildungTyp -> {
+                erzeugeAusdruck(ziel.ziel)
+                erzeugeMitTyp(ziel.index, zielTyp.schlüssel)
+                objektiviere(artVon(zielTyp.schlüssel, ziel.position))
+                erzeugeMitTyp(wert, zielTyp.wert)
+                objektiviere(artVon(zielTyp.wert, ziel.position))
+                cob.invokeinterface(
+                    CD_Map, "put",
+                    MethodTypeDesc.of(ConstantDescs.CD_Object, ConstantDescs.CD_Object, ConstantDescs.CD_Object),
+                )
+                cob.pop()
+            }
+            else -> ablehnen(
+                "Indexzuweisung wird nur fuer Liste und Abbildung unterstuetzt", ziel.position,
+            )
+        }
+    }
+
+    /** Erzeugt `neu Typ(...)`: `new` + Konstruktoraufruf fuer Datensaetze und Klassen. */
+    private fun erzeugeNeu(ausdruck: NeuAusdruck) {
+        val ktorTypen = when (symbole.typen[ausdruck.typname]) {
+            is DatensatzTyp -> symbole.datensatzDeklarationen.getValue(ausdruck.typname)
+                .felder.map { auflöse(it.typ) }
+            is KlassenTyp -> ktorFelderKette(symbole.klassenDeklarationen.getValue(ausdruck.typname))
+                .map { auflöse(it.typ) }
+            else -> ablehnen(
+                "'neu ${ausdruck.typname}': unbekannter oder nicht unterstuetzter Typ",
+                ausdruck.position,
+            )
+        }
+        val ziel = ClassDesc.of(ausdruck.typname)
+        cob.new_(ziel)
+        cob.dup()
+        ausdruck.argumente.forEachIndexed { i, argument -> erzeugeMitTyp(argument, ktorTypen[i]) }
+        cob.invokespecial(
+            ziel, "<init>",
+            MethodTypeDesc.of(ConstantDescs.CD_void, ktorTypen.map { classDescVonTyp(it) }),
+        )
+    }
+
+    /** Erzeugt `ziel.feld`: Aufzaehlungsvariante (`getstatic`) oder Feldzugriff (`getfield`). */
+    private fun erzeugeFeldzugriff(ausdruck: FeldzugriffAusdruck) {
+        val enumTyp = aufzählungsVariante(ausdruck)
+        if (enumTyp != null) {
+            val ziel = ClassDesc.of(enumTyp.name)
+            cob.getstatic(ziel, ausdruck.feld, ziel)
+            return
+        }
+        if (ausdruck.sicher) {
+            ablehnen(
+                "Sicherer Feldzugriff '?.' wird vom Bytecode-Backend noch nicht unterstuetzt",
+                ausdruck.position,
+            )
+        }
+        val zielTyp = entnullt(typVon(ausdruck.ziel))
+        val feldTyp = feldTypVon(zielTyp, ausdruck.feld, ausdruck.position)
+        erzeugeAusdruck(ausdruck.ziel)
+        if (zielTyp is PaarTyp) {
+            // EdelPaar speichert beide Komponenten als Object.
+            cob.getfield(CD_EdelPaar, ausdruck.feld, ConstantDescs.CD_Object)
+            entObjektiviere(feldTyp)
+        } else {
+            cob.getfield(ClassDesc.of(typname(zielTyp)), ausdruck.feld, classDescVonTyp(feldTyp))
+        }
+    }
+
+    /** Der Typ des Feldes [feld] eines Datensatz-, Klassen- oder Paartyps. */
+    private fun feldTypVon(zielTyp: Typ, feld: String, position: Position): Typ = when (zielTyp) {
+        is PaarTyp -> when (feld) {
+            "erst" -> zielTyp.erst
+            "zweit" -> zielTyp.zweit
+            else -> ablehnen("Paar hat kein Feld '$feld'", position)
+        }
+        is DatensatzTyp -> zielTyp.felder[feld]
+            ?: ablehnen("Unbekanntes Feld '$feld'", position)
+        is KlassenTyp -> zielTyp.findeFeld(feld)?.typ
+            ?: ablehnen("Unbekanntes Feld '$feld'", position)
+        else -> ablehnen("Feldzugriff wird nur fuer Datensaetze und Klassen unterstuetzt", position)
+    }
+
+    private fun typname(typ: Typ): String = when (typ) {
+        is DatensatzTyp -> typ.name
+        is KlassenTyp -> typ.name
+        else -> ablehnen("Erwartet wurde ein Objekttyp, gefunden: '$typ'", Position(0, 0))
     }
 
     private fun erzeugeBinär(ausdruck: BinärAusdruck) {
@@ -756,6 +1574,14 @@ class Bytecodeerzeuger(
             GLEICH, UNGLEICH -> {
                 val links = typVon(ausdruck.links)
                 val rechts = typVon(ausdruck.rechts)
+                val basis = entnullt(links).takeIf { it != NichtsTyp } ?: entnullt(rechts)
+                if (basis is DatensatzTyp || basis is KlassenTyp) {
+                    ablehnen(
+                        "Gleichheit auf Datensaetzen/Klassen wird vom Bytecode-Backend noch " +
+                            "nicht unterstuetzt",
+                        ausdruck.position,
+                    )
+                }
                 if (istNullbar(links) || istNullbar(rechts)) {
                     erzeugeNullVergleich(ausdruck)
                 } else {
@@ -1004,6 +1830,11 @@ class Bytecodeerzeuger(
                     sprungAufNull(vgl, ziel)
                 }
             }
+            Art.OBJEKT -> when (vgl) {
+                // Aufzaehlungsvarianten sind Singletons: Referenzgleichheit genuegt.
+                Vgl.NE -> cob.if_acmpne(ziel)
+                else -> cob.if_acmpeq(ziel)
+            }
             else -> {} // nullbare Arten laufen ueber erzeugeNullVergleich
         }
     }
@@ -1021,6 +1852,15 @@ class Bytecodeerzeuger(
 
     private fun erzeugeWähle(ausdruck: WähleAusdruck) {
         val subjektTyp = typVon(ausdruck.subjekt)
+        entnullt(subjektTyp).let { basis ->
+            if (basis is DatensatzTyp || basis is KlassenTyp) {
+                ablehnen(
+                    "'wähle' ueber Datensaetze/Klassen wird vom Bytecode-Backend noch " +
+                        "nicht unterstuetzt",
+                    ausdruck.position,
+                )
+            }
+        }
         val subjektArt = artVon(subjektTyp, ausdruck.subjekt.position)
         val subjektSlot = belegeSlot(subjektArt)
         erzeugeAusdruck(ausdruck.subjekt)
@@ -1043,25 +1883,40 @@ class Bytecodeerzeuger(
 
     private fun erzeugeAufruf(ausdruck: AufrufAusdruck) {
         val ziel = ausdruck.ziel
-        if (ziel !is Bezeichner) {
-            ablehnen("Nur direkte Funktionsaufrufe werden unterstuetzt", ausdruck.position)
+        if (ziel is FeldzugriffAusdruck) {
+            erzeugeMethodenaufruf(ziel, ausdruck.argumente)
+            return
+        }
+        // Ein Funktionswert (Lambda in einer Variablen oder beliebiger Ausdruck).
+        if (ziel !is Bezeichner || findeVariable(ziel.name) != null) {
+            val zielTyp = typVon(ziel)
+            if (zielTyp is FunktionsTyp) {
+                erzeugeFunktionswertAufruf(ziel, zielTyp, ausdruck.argumente)
+                return
+            }
+            ablehnen("Nur Funktionswerte koennen aufgerufen werden", ausdruck.position)
         }
         when (ziel.name) {
             "drucke" -> erzeugeDrucke(ausdruck.argumente[0])
             "länge" -> {
                 val argument = ausdruck.argumente[0]
-                if (typVon(argument) != TextTyp) {
-                    ablehnen(
-                        "'länge' wird vom Bytecode-Backend nur fuer Text unterstuetzt",
+                erzeugeAusdruck(argument)
+                when (entnullt(typVon(argument))) {
+                    TextTyp -> cob.invokevirtual(CD_String, "length", MethodTypeDesc.of(ConstantDescs.CD_int))
+                    is ListeTyp -> cob.invokeinterface(CD_List, "size", MethodTypeDesc.of(ConstantDescs.CD_int))
+                    is AbbildungTyp -> cob.invokeinterface(CD_Map, "size", MethodTypeDesc.of(ConstantDescs.CD_int))
+                    else -> ablehnen(
+                        "'länge' wird nur fuer Text, Liste und Abbildung unterstuetzt",
                         argument.position,
                     )
                 }
-                erzeugeAusdruck(argument)
-                cob.invokevirtual(CD_String, "length", MethodTypeDesc.of(ConstantDescs.CD_int))
                 cob.i2l()
             }
-            "lies", "Liste", "Abbildung", "Paar" -> ablehnen(
-                "'${ziel.name}' wird vom Bytecode-Backend (Kern) noch nicht unterstuetzt",
+            "Liste" -> erzeugeListe(ausdruck)
+            "Paar" -> erzeugePaar(ausdruck)
+            "Abbildung" -> erzeugeAbbildung(ausdruck)
+            "lies" -> ablehnen(
+                "'lies' wird vom Bytecode-Backend noch nicht unterstuetzt",
                 ausdruck.position,
             )
             else -> {
@@ -1072,6 +1927,362 @@ class Bytecodeerzeuger(
                 }
                 cob.invokestatic(selbst, ziel.name, deskriptor(ziel.name))
             }
+        }
+    }
+
+    /** Ruft einen Funktionswert auf: `invokeinterface EdelFunktionN.anwenden(Object…)Object`. */
+    private fun erzeugeFunktionswertAufruf(
+        ziel: Ausdruck,
+        funkTyp: FunktionsTyp,
+        argumente: List<Ausdruck>,
+    ) {
+        erzeugeAusdruck(ziel)
+        argumente.forEachIndexed { i, argument ->
+            erzeugeMitTyp(argument, funkTyp.parameter[i])
+            objektiviere(artVon(funkTyp.parameter[i], argument.position))
+        }
+        val stelligkeit = funkTyp.parameter.size
+        val samTyp = MethodTypeDesc.of(
+            ConstantDescs.CD_Object, List(stelligkeit) { ConstantDescs.CD_Object },
+        )
+        cob.invokeinterface(funktionsSchnittstelle(stelligkeit), "anwenden", samTyp)
+        entObjektiviere(funkTyp.rückgabe)
+    }
+
+    /** Erzeugt `empfänger.methode(args)` ueber `invokevirtual`. */
+    private fun erzeugeMethodenaufruf(zugriff: FeldzugriffAusdruck, argumente: List<Ausdruck>) {
+        if (zugriff.sicher) {
+            ablehnen(
+                "Sicherer Methodenaufruf '?.' wird vom Bytecode-Backend noch nicht unterstuetzt",
+                zugriff.position,
+            )
+        }
+        val empfängerTyp = entnullt(typVon(zugriff.ziel))
+        if (empfängerTyp is TextTyp || empfängerTyp is ListeTyp || empfängerTyp is AbbildungTyp ||
+            empfängerTyp == GanzzahlTyp || empfängerTyp == KommazahlTyp ||
+            empfängerTyp == WahrheitTyp || empfängerTyp == ZeichenTyp
+        ) {
+            erzeugeEingebauteMethode(zugriff.ziel, empfängerTyp, zugriff.feld, argumente, zugriff.position)
+            return
+        }
+        val signatur: FunktionsTyp
+        val besitzer: ClassDesc
+        val istSchnittstelle: Boolean
+        when (empfängerTyp) {
+            is KlassenTyp -> {
+                signatur = empfängerTyp.findeMethode(zugriff.feld)
+                    ?: ablehnen("Unbekannte Methode '${zugriff.feld}'", zugriff.position)
+                besitzer = ClassDesc.of(empfängerTyp.name)
+                istSchnittstelle = false
+            }
+            is SchnittstellenTyp -> {
+                signatur = empfängerTyp.methoden[zugriff.feld]
+                    ?: ablehnen("Unbekannte Methode '${zugriff.feld}'", zugriff.position)
+                besitzer = ClassDesc.of(empfängerTyp.name)
+                istSchnittstelle = true
+            }
+            else -> ablehnen(
+                "Methodenaufrufe werden nur fuer Klassen und Schnittstellen unterstuetzt",
+                zugriff.position,
+            )
+        }
+        erzeugeAusdruck(zugriff.ziel)
+        argumente.forEachIndexed { i, argument -> erzeugeMitTyp(argument, signatur.parameter[i]) }
+        val rückgabe = if (signatur.rückgabe == NichtsTyp) {
+            ConstantDescs.CD_void
+        } else {
+            classDescVonTyp(signatur.rückgabe)
+        }
+        val desc = MethodTypeDesc.of(rückgabe, signatur.parameter.map { classDescVonTyp(it) })
+        if (istSchnittstelle) {
+            cob.invokeinterface(besitzer, zugriff.feld, desc)
+        } else {
+            cob.invokevirtual(besitzer, zugriff.feld, desc)
+        }
+    }
+
+    // ---- Sammlungen (Liste, Abbildung, Paar) --------------------------------
+
+    /** Erzeugt `Liste(...)`: eine `ArrayList`, gefuellt mit den geboxten Argumenten. */
+    private fun erzeugeListe(ausdruck: AufrufAusdruck) {
+        val element = (typVon(ausdruck) as ListeTyp).element
+        cob.new_(CD_ArrayList)
+        cob.dup()
+        cob.invokespecial(CD_ArrayList, "<init>", MethodTypeDesc.of(ConstantDescs.CD_void))
+        for (argument in ausdruck.argumente) {
+            cob.dup()
+            erzeugeMitTyp(argument, element)
+            objektiviere(artVon(element, argument.position))
+            cob.invokeinterface(
+                CD_List, "add", MethodTypeDesc.of(ConstantDescs.CD_boolean, ConstantDescs.CD_Object),
+            )
+            cob.pop()
+        }
+    }
+
+    /** Erzeugt `Paar(a, b)`: ein `EdelPaar` mit zwei geboxten Komponenten. */
+    private fun erzeugePaar(ausdruck: AufrufAusdruck) {
+        brauchtPaar = true
+        val paarTyp = typVon(ausdruck) as PaarTyp
+        cob.new_(CD_EdelPaar)
+        cob.dup()
+        erzeugeMitTyp(ausdruck.argumente[0], paarTyp.erst)
+        objektiviere(artVon(paarTyp.erst, ausdruck.position))
+        erzeugeMitTyp(ausdruck.argumente[1], paarTyp.zweit)
+        objektiviere(artVon(paarTyp.zweit, ausdruck.position))
+        cob.invokespecial(
+            CD_EdelPaar, "<init>",
+            MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object, ConstantDescs.CD_Object),
+        )
+    }
+
+    /** Erzeugt `Abbildung(Paar(...), …)`: eine `LinkedHashMap` aus den Paaren. */
+    private fun erzeugeAbbildung(ausdruck: AufrufAusdruck) {
+        brauchtPaar = true
+        cob.new_(CD_LinkedHashMap)
+        cob.dup()
+        cob.invokespecial(CD_LinkedHashMap, "<init>", MethodTypeDesc.of(ConstantDescs.CD_void))
+        for (argument in ausdruck.argumente) {
+            erzeugeAusdruck(argument) // ein EdelPaar
+            val paarSlot = belegeSlot(Art.OBJEKT)
+            cob.astore(paarSlot)
+            cob.dup()
+            cob.aload(paarSlot)
+            cob.getfield(CD_EdelPaar, "erst", ConstantDescs.CD_Object)
+            cob.aload(paarSlot)
+            cob.getfield(CD_EdelPaar, "zweit", ConstantDescs.CD_Object)
+            cob.invokeinterface(
+                CD_Map, "put",
+                MethodTypeDesc.of(ConstantDescs.CD_Object, ConstantDescs.CD_Object, ConstantDescs.CD_Object),
+            )
+            cob.pop()
+        }
+    }
+
+    /** Erzeugt die Klasse `EdelPaar` (zwei `Object`-Felder, Konstruktor, `toString`). */
+    private fun erzeugeEdelPaar(): ByteArray = ClassFile.of().build(CD_EdelPaar) { clb ->
+        clb.withFlags(ClassFile.ACC_PUBLIC or ClassFile.ACC_FINAL)
+        clb.withField("erst", ConstantDescs.CD_Object, ClassFile.ACC_PUBLIC or ClassFile.ACC_FINAL)
+        clb.withField("zweit", ConstantDescs.CD_Object, ClassFile.ACC_PUBLIC or ClassFile.ACC_FINAL)
+        clb.withMethodBody(
+            "<init>",
+            MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object, ConstantDescs.CD_Object),
+            ClassFile.ACC_PUBLIC,
+        ) { code ->
+            code.aload(0)
+            code.invokespecial(ConstantDescs.CD_Object, "<init>", MethodTypeDesc.of(ConstantDescs.CD_void))
+            code.aload(0); code.aload(1); code.putfield(CD_EdelPaar, "erst", ConstantDescs.CD_Object)
+            code.aload(0); code.aload(2); code.putfield(CD_EdelPaar, "zweit", ConstantDescs.CD_Object)
+            code.return_()
+        }
+        clb.withMethodBody("toString", MethodTypeDesc.of(CD_String), ClassFile.ACC_PUBLIC) { code ->
+            cob = code
+            cob.new_(CD_StringBuilder)
+            cob.dup()
+            cob.invokespecial(CD_StringBuilder, "<init>", MethodTypeDesc.of(ConstantDescs.CD_void))
+            anhängenText("(")
+            for ((i, feld) in listOf("erst", "zweit").withIndex()) {
+                if (i > 0) anhängenText(", ")
+                cob.aload(0)
+                cob.getfield(CD_EdelPaar, feld, ConstantDescs.CD_Object)
+                cob.invokestatic(
+                    CD_String, "valueOf", MethodTypeDesc.of(CD_String, ConstantDescs.CD_Object),
+                )
+                cob.invokevirtual(
+                    CD_StringBuilder, "append", MethodTypeDesc.of(CD_StringBuilder, CD_String),
+                )
+            }
+            anhängenText(")")
+            cob.invokevirtual(CD_StringBuilder, "toString", MethodTypeDesc.of(CD_String))
+            cob.areturn()
+        }
+    }
+
+    /** Erzeugt den Aufruf einer eingebauten Methode auf Text, Liste, Abbildung oder Grundwert. */
+    private fun erzeugeEingebauteMethode(
+        empfänger: Ausdruck,
+        empfängerTyp: Typ,
+        name: String,
+        argumente: List<Ausdruck>,
+        position: Position,
+    ) {
+        when (empfängerTyp) {
+            TextTyp -> erzeugeTextMethode(empfänger, name, argumente, position)
+            is ListeTyp -> erzeugeListeMethode(empfänger, empfängerTyp, name, argumente, position)
+            is AbbildungTyp -> erzeugeAbbildungMethode(empfänger, empfängerTyp, name, argumente, position)
+            else -> if (name == "alsText") {
+                erzeugeAlsText(empfänger)
+            } else {
+                ablehnen("'$empfängerTyp' hat keine Methode '$name'", position)
+            }
+        }
+    }
+
+    private fun erzeugeTextMethode(
+        empfänger: Ausdruck,
+        name: String,
+        argumente: List<Ausdruck>,
+        position: Position,
+    ) {
+        when (name) {
+            "länge" -> {
+                erzeugeAusdruck(empfänger)
+                cob.invokevirtual(CD_String, "length", MethodTypeDesc.of(ConstantDescs.CD_int))
+                cob.i2l()
+            }
+            "großbuchstaben" -> {
+                erzeugeAusdruck(empfänger)
+                cob.invokevirtual(CD_String, "toUpperCase", MethodTypeDesc.of(CD_String))
+            }
+            "kleinbuchstaben" -> {
+                erzeugeAusdruck(empfänger)
+                cob.invokevirtual(CD_String, "toLowerCase", MethodTypeDesc.of(CD_String))
+            }
+            "alsText" -> erzeugeAusdruck(empfänger)
+            "enthält" -> {
+                erzeugeAusdruck(empfänger)
+                erzeugeMitTyp(argumente[0], TextTyp)
+                cob.invokevirtual(
+                    CD_String, "contains", MethodTypeDesc.of(ConstantDescs.CD_boolean, CD_CharSequence),
+                )
+            }
+            "zeichenBei" -> {
+                erzeugeAusdruck(empfänger)
+                erzeugeMitTyp(argumente[0], GanzzahlTyp)
+                cob.l2i()
+                cob.invokevirtual(
+                    CD_String, "charAt", MethodTypeDesc.of(ConstantDescs.CD_char, ConstantDescs.CD_int),
+                )
+            }
+            "teile" -> {
+                cob.new_(CD_ArrayList)
+                cob.dup()
+                erzeugeAusdruck(empfänger)
+                erzeugeMitTyp(argumente[0], TextTyp)
+                cob.invokevirtual(CD_String, "split", MethodTypeDesc.of(CD_StringArray, CD_String))
+                cob.invokestatic(CD_Arrays, "asList", MethodTypeDesc.of(CD_List, CD_ObjectArray))
+                cob.invokespecial(CD_ArrayList, "<init>", MethodTypeDesc.of(ConstantDescs.CD_void, CD_Collection))
+            }
+            else -> ablehnen("Text hat keine Methode '$name'", position)
+        }
+    }
+
+    private fun erzeugeListeMethode(
+        empfänger: Ausdruck,
+        listeTyp: ListeTyp,
+        name: String,
+        argumente: List<Ausdruck>,
+        position: Position,
+    ) {
+        val element = listeTyp.element
+        when (name) {
+            "länge" -> {
+                erzeugeAusdruck(empfänger)
+                cob.invokeinterface(CD_List, "size", MethodTypeDesc.of(ConstantDescs.CD_int))
+                cob.i2l()
+            }
+            "istLeer" -> {
+                erzeugeAusdruck(empfänger)
+                cob.invokeinterface(CD_List, "isEmpty", MethodTypeDesc.of(ConstantDescs.CD_boolean))
+            }
+            "hinzufügen" -> {
+                erzeugeAusdruck(empfänger)
+                erzeugeMitTyp(argumente[0], element)
+                objektiviere(artVon(element, position))
+                cob.invokeinterface(
+                    CD_List, "add", MethodTypeDesc.of(ConstantDescs.CD_boolean, ConstantDescs.CD_Object),
+                )
+                cob.pop()
+            }
+            "holen" -> {
+                erzeugeAusdruck(empfänger)
+                erzeugeMitTyp(argumente[0], GanzzahlTyp)
+                cob.l2i()
+                cob.invokeinterface(
+                    CD_List, "get", MethodTypeDesc.of(ConstantDescs.CD_Object, ConstantDescs.CD_int),
+                )
+                entObjektiviere(element)
+            }
+            "setze" -> {
+                erzeugeAusdruck(empfänger)
+                erzeugeMitTyp(argumente[0], GanzzahlTyp)
+                cob.l2i()
+                erzeugeMitTyp(argumente[1], element)
+                objektiviere(artVon(element, position))
+                cob.invokeinterface(
+                    CD_List, "set",
+                    MethodTypeDesc.of(ConstantDescs.CD_Object, ConstantDescs.CD_int, ConstantDescs.CD_Object),
+                )
+                cob.pop()
+            }
+            "entferne" -> {
+                erzeugeAusdruck(empfänger)
+                erzeugeMitTyp(argumente[0], GanzzahlTyp)
+                cob.l2i()
+                cob.invokeinterface(
+                    CD_List, "remove", MethodTypeDesc.of(ConstantDescs.CD_Object, ConstantDescs.CD_int),
+                )
+                entObjektiviere(element)
+            }
+            else -> ablehnen("Liste hat keine Methode '$name'", position)
+        }
+    }
+
+    private fun erzeugeAbbildungMethode(
+        empfänger: Ausdruck,
+        abbTyp: AbbildungTyp,
+        name: String,
+        argumente: List<Ausdruck>,
+        position: Position,
+    ) {
+        when (name) {
+            "länge" -> {
+                erzeugeAusdruck(empfänger)
+                cob.invokeinterface(CD_Map, "size", MethodTypeDesc.of(ConstantDescs.CD_int))
+                cob.i2l()
+            }
+            "istLeer" -> {
+                erzeugeAusdruck(empfänger)
+                cob.invokeinterface(CD_Map, "isEmpty", MethodTypeDesc.of(ConstantDescs.CD_boolean))
+            }
+            "enthält" -> {
+                erzeugeAusdruck(empfänger)
+                erzeugeMitTyp(argumente[0], abbTyp.schlüssel)
+                objektiviere(artVon(abbTyp.schlüssel, position))
+                cob.invokeinterface(
+                    CD_Map, "containsKey",
+                    MethodTypeDesc.of(ConstantDescs.CD_boolean, ConstantDescs.CD_Object),
+                )
+            }
+            "holen" -> {
+                erzeugeAusdruck(empfänger)
+                erzeugeMitTyp(argumente[0], abbTyp.schlüssel)
+                objektiviere(artVon(abbTyp.schlüssel, position))
+                cob.invokeinterface(
+                    CD_Map, "get", MethodTypeDesc.of(ConstantDescs.CD_Object, ConstantDescs.CD_Object),
+                )
+                entObjektiviere(abbTyp.wert)
+            }
+            "setze" -> {
+                erzeugeAusdruck(empfänger)
+                erzeugeMitTyp(argumente[0], abbTyp.schlüssel)
+                objektiviere(artVon(abbTyp.schlüssel, position))
+                erzeugeMitTyp(argumente[1], abbTyp.wert)
+                objektiviere(artVon(abbTyp.wert, position))
+                cob.invokeinterface(
+                    CD_Map, "put",
+                    MethodTypeDesc.of(ConstantDescs.CD_Object, ConstantDescs.CD_Object, ConstantDescs.CD_Object),
+                )
+                cob.pop()
+            }
+            "schlüssel" -> {
+                cob.new_(CD_ArrayList)
+                cob.dup()
+                erzeugeAusdruck(empfänger)
+                cob.invokeinterface(CD_Map, "keySet", MethodTypeDesc.of(CD_Set))
+                cob.invokespecial(CD_ArrayList, "<init>", MethodTypeDesc.of(ConstantDescs.CD_void, CD_Collection))
+            }
+            else -> ablehnen("Abbildung hat keine Methode '$name'", position)
         }
     }
 
@@ -1141,16 +2352,48 @@ class Bytecodeerzeuger(
             else -> numerischerTyp(ausdruck.links, ausdruck.rechts)
         }
         is AufrufAusdruck -> {
-            val ziel = ausdruck.ziel
-            if (ziel is Bezeichner) {
-                when (ziel.name) {
-                    "drucke" -> NichtsTyp
-                    "länge" -> GanzzahlTyp
-                    else -> symbole.funktionen[ziel.name]?.rückgabe
-                        ?: ablehnen("Unbekannte Funktion: '${ziel.name}'", ausdruck.position)
+            when (val ziel = ausdruck.ziel) {
+                is FeldzugriffAusdruck -> when (val empfängerTyp = entnullt(typVon(ziel.ziel))) {
+                    is KlassenTyp -> empfängerTyp.findeMethode(ziel.feld)?.rückgabe
+                        ?: ablehnen("Unbekannte Methode '${ziel.feld}'", ausdruck.position)
+                    is SchnittstellenTyp -> empfängerTyp.methoden[ziel.feld]?.rückgabe
+                        ?: ablehnen("Unbekannte Methode '${ziel.feld}'", ausdruck.position)
+                    else -> Typpruefer.eingebauteMethode(empfängerTyp, ziel.feld)?.rückgabe
+                        ?: ablehnen("$empfängerTyp hat keine Methode '${ziel.feld}'", ausdruck.position)
                 }
-            } else {
-                ablehnen("Nur direkte Funktionsaufrufe werden unterstuetzt", ausdruck.position)
+                is Bezeichner -> {
+                    val variable = findeVariable(ziel.name)
+                    when {
+                        variable?.typ is FunktionsTyp -> (variable.typ as FunktionsTyp).rückgabe
+                        variable != null -> ablehnen("'${ziel.name}' ist kein Funktionswert", ausdruck.position)
+                        ziel.name == "drucke" -> NichtsTyp
+                        ziel.name == "länge" -> GanzzahlTyp
+                        ziel.name == "Liste" -> ListeTyp(
+                            ausdruck.argumente.map { typVon(it) }
+                                .reduceOrNull { a, b -> gemeinsamerTyp(a, b) } ?: FehlerTyp,
+                        )
+                        ziel.name == "Paar" -> PaarTyp(
+                            typVon(ausdruck.argumente[0]), typVon(ausdruck.argumente[1]),
+                        )
+                        ziel.name == "Abbildung" -> {
+                            val paare = ausdruck.argumente.map { typVon(it) as PaarTyp }
+                            AbbildungTyp(
+                                paare.map { it.erst }.reduceOrNull { a, b -> gemeinsamerTyp(a, b) } ?: FehlerTyp,
+                                paare.map { it.zweit }.reduceOrNull { a, b -> gemeinsamerTyp(a, b) } ?: FehlerTyp,
+                            )
+                        }
+                        else -> symbole.funktionen[ziel.name]?.rückgabe
+                            ?: ablehnen("Unbekannte Funktion: '${ziel.name}'", ausdruck.position)
+                    }
+                }
+                else -> {
+                    val zielTyp = typVon(ziel)
+                    if (zielTyp is FunktionsTyp) {
+                        zielTyp.rückgabe
+                    } else {
+                        ablehnen("Nur Funktionswerte koennen aufgerufen werden", ausdruck.position)
+                    }
+                }
             }
         }
         is WähleAusdruck -> {
@@ -1160,8 +2403,22 @@ class Bytecodeerzeuger(
         }
         is ElvisAusdruck -> gemeinsamerTyp(entnullt(typVon(ausdruck.links)), typVon(ausdruck.rechts))
         is NichtNullAusdruck -> entnullt(typVon(ausdruck.operand))
-        is DiesAusdruck, is NeuAusdruck, is LambdaAusdruck, is IndexAusdruck, is FeldzugriffAusdruck ->
-            ablehnen("Dieser Ausdruck wird vom Bytecode-Backend nicht unterstuetzt", ausdruck.position)
+        is NeuAusdruck -> symbole.typen[ausdruck.typname]
+            ?: ablehnen("Unbekannter Typ: '${ausdruck.typname}'", ausdruck.position)
+        is FeldzugriffAusdruck -> aufzählungsVariante(ausdruck)
+            ?: feldTypVon(entnullt(typVon(ausdruck.ziel)), ausdruck.feld, ausdruck.position)
+        is DiesAusdruck -> aktuelleKlasse
+            ?: ablehnen("'dies' ist nur in Methoden gueltig", ausdruck.position)
+        is LambdaAusdruck ->
+            FunktionsTyp(ausdruck.parameter.map { auflöse(it.typ) }, lambdaRückgabe(ausdruck))
+        is IndexAusdruck -> when (val zielTyp = entnullt(typVon(ausdruck.ziel))) {
+            is ListeTyp -> zielTyp.element
+            is AbbildungTyp -> zielTyp.wert
+            TextTyp -> ZeichenTyp
+            else -> ablehnen(
+                "Indexzugriff wird nur fuer Liste, Abbildung und Text unterstuetzt", ausdruck.position,
+            )
+        }
     }
 
     private fun numerischerTyp(links: Ausdruck, rechts: Ausdruck): Typ =
@@ -1198,10 +2455,44 @@ class Bytecodeerzeuger(
         val rückgabe = if (signatur.rückgabe == NichtsTyp) {
             ConstantDescs.CD_void
         } else {
-            classDesc(artVon(signatur.rückgabe, Position(0, 0)))
+            classDescVonTyp(signatur.rückgabe)
         }
-        val parameter = signatur.parameter.map { classDesc(artVon(it, Position(0, 0))) }
-        return MethodTypeDesc.of(rückgabe, parameter)
+        return MethodTypeDesc.of(rückgabe, signatur.parameter.map { classDescVonTyp(it) })
+    }
+
+    /** Liefert den JVM-Klassendeskriptor eines Edel-Typs (Grundtypen, Text, Datensaetze). */
+    private fun classDescVonTyp(typ: Typ): ClassDesc = when (typ) {
+        GanzzahlTyp -> ConstantDescs.CD_long
+        KommazahlTyp -> ConstantDescs.CD_double
+        WahrheitTyp -> ConstantDescs.CD_boolean
+        ZeichenTyp -> ConstantDescs.CD_char
+        TextTyp -> CD_String
+        NichtsTyp -> ConstantDescs.CD_Object
+        is DatensatzTyp -> ClassDesc.of(typ.name)
+        is KlassenTyp -> ClassDesc.of(typ.name)
+        is AufzählungTyp -> ClassDesc.of(typ.name)
+        is SchnittstellenTyp -> ClassDesc.of(typ.name)
+        is FunktionsTyp -> funktionsSchnittstelle(typ.parameter.size)
+        is ListeTyp -> CD_List
+        is AbbildungTyp -> CD_Map
+        is PaarTyp -> { brauchtPaar = true; CD_EdelPaar }
+        is NullbarTyp -> when (val basis = typ.basis) {
+            GanzzahlTyp -> CD_Long
+            KommazahlTyp -> CD_Double
+            WahrheitTyp -> CD_Boolean
+            ZeichenTyp -> CD_Character
+            TextTyp -> CD_String
+            is DatensatzTyp -> ClassDesc.of(basis.name)
+            is KlassenTyp -> ClassDesc.of(basis.name)
+            is AufzählungTyp -> ClassDesc.of(basis.name)
+            is SchnittstellenTyp -> ClassDesc.of(basis.name)
+            is FunktionsTyp -> funktionsSchnittstelle(basis.parameter.size)
+            is ListeTyp -> CD_List
+            is AbbildungTyp -> CD_Map
+            is PaarTyp -> { brauchtPaar = true; CD_EdelPaar }
+            else -> ablehnen("Der Typ '$typ' wird vom Bytecode-Backend nicht unterstuetzt", Position(0, 0))
+        }
+        else -> ablehnen("Der Typ '$typ' wird vom Bytecode-Backend nicht unterstuetzt", Position(0, 0))
     }
 
     private fun classDesc(art: Art): ClassDesc = when (art) {
@@ -1215,7 +2506,7 @@ class Bytecodeerzeuger(
         Art.N_WAHR -> CD_Boolean
         Art.N_ZEICH -> CD_Character
         Art.N_TEXT -> CD_String
-        Art.NICHTS -> ConstantDescs.CD_Object
+        Art.NICHTS, Art.OBJEKT -> ConstantDescs.CD_Object
     }
 
     private fun artVon(typ: Typ, position: Position): Art = when (typ) {
@@ -1225,12 +2516,24 @@ class Bytecodeerzeuger(
         ZeichenTyp -> Art.ZEICH
         TextTyp -> Art.TEXT
         NichtsTyp -> Art.NICHTS
+        is DatensatzTyp -> Art.OBJEKT
+        is KlassenTyp -> Art.OBJEKT
+        is AufzählungTyp -> Art.OBJEKT
+        is SchnittstellenTyp -> Art.OBJEKT
+        is FunktionsTyp -> Art.OBJEKT
+        is ListeTyp, is AbbildungTyp, is PaarTyp -> Art.OBJEKT
         is NullbarTyp -> when (typ.basis) {
             GanzzahlTyp -> Art.N_GANZ
             KommazahlTyp -> Art.N_KOMMA
             WahrheitTyp -> Art.N_WAHR
             ZeichenTyp -> Art.N_ZEICH
             TextTyp -> Art.N_TEXT
+            is DatensatzTyp -> Art.OBJEKT
+            is KlassenTyp -> Art.OBJEKT
+            is AufzählungTyp -> Art.OBJEKT
+            is SchnittstellenTyp -> Art.OBJEKT
+            is FunktionsTyp -> Art.OBJEKT
+            is ListeTyp, is AbbildungTyp, is PaarTyp -> Art.OBJEKT
             else -> ablehnen(
                 "Der Typ '$typ' wird vom Bytecode-Backend (Kern) nicht unterstuetzt",
                 position,
@@ -1371,6 +2674,20 @@ class Bytecodeerzeuger(
         val CD_Character: ClassDesc = ClassDesc.of("java.lang.Character")
         val CD_Objects: ClassDesc = ClassDesc.of("java.util.Objects")
         val CD_NullPointerException: ClassDesc = ClassDesc.of("java.lang.NullPointerException")
+        val CD_StringBuilder: ClassDesc = ClassDesc.of("java.lang.StringBuilder")
+        val CD_Number: ClassDesc = ClassDesc.of("java.lang.Number")
+        val CD_List: ClassDesc = ClassDesc.of("java.util.List")
+        val CD_ArrayList: ClassDesc = ClassDesc.of("java.util.ArrayList")
+        val CD_Map: ClassDesc = ClassDesc.of("java.util.Map")
+        val CD_LinkedHashMap: ClassDesc = ClassDesc.of("java.util.LinkedHashMap")
+        val CD_Collection: ClassDesc = ClassDesc.of("java.util.Collection")
+        val CD_Set: ClassDesc = ClassDesc.of("java.util.Set")
+        val CD_Iterator: ClassDesc = ClassDesc.of("java.util.Iterator")
+        val CD_Arrays: ClassDesc = ClassDesc.of("java.util.Arrays")
+        val CD_StringArray: ClassDesc = ClassDesc.ofDescriptor("[Ljava/lang/String;")
+        val CD_ObjectArray: ClassDesc = ClassDesc.ofDescriptor("[Ljava/lang/Object;")
+        val CD_CharSequence: ClassDesc = ClassDesc.of("java.lang.CharSequence")
+        val CD_EdelPaar: ClassDesc = ClassDesc.of("EdelPaar")
 
         /** Bootstrap-Methode java.lang.invoke.LambdaMetafactory.metafactory fuer invokedynamic. */
         val METAFACTORY: DirectMethodHandleDesc = MethodHandleDesc.ofMethod(

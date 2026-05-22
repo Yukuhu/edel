@@ -268,17 +268,26 @@ Lexer, Parser und Typprüfer werden unverändert weiterverwendet — es kommt nu
 ein zweites Backend hinzu. Edel-Typen werden auf native JVM-Typen abgebildet
 (`Ganzzahl`→`long`, `Kommazahl`→`double`, `Wahrheit`→`boolean`,
 `Zeichen`→`char`, `Text`→`String`), jede `funktion` wird zu einer `static`-Methode.
+`datensatz`, `klasse`, `aufzählung` und `schnittstelle` werden zu eigenen
+`.class`-Dateien, Lambdas zu `invokedynamic`-Aufrufstellen, `Liste`/`Abbildung`
+auf `java.util.ArrayList`/`LinkedHashMap`; `übersetze` liefert daher eine
+`.class` je Typ plus die Hauptklasse.
 
-Das Backend deckt den **Sprachkern** ab: Funktionen, Grundtypen, sämtlichen
-Kontrollfluss, Rekursion und `wähle` über Grundwerte. Programme mit Klassen,
-Datensätzen, Aufzählungen, Lambdas oder Sammlungen lehnt `übersetze` mit einer
-klaren Meldung ab — sie laufen weiterhin über `edel starte`.
+Das Backend deckt den **vollen Sprachumfang** ab: Funktionen, Grundtypen,
+sämtlichen Kontrollfluss, Rekursion, `wähle`, **Datensätze**, **Klassen** (`neu`,
+Felder, Methoden, `dies`, **Vererbung**), **Aufzählungen**, **Schnittstellen**
+(`erfüllt`, virtuelle Methoden), **Lambdas** (gefangene Variablen) und
+**Sammlungen** (`Liste`, `Abbildung`, `Paar`). Lediglich die Eingabe `lies`
+bleibt dem Interpreter vorbehalten. Auch `beispiele/datensatz.edel` und
+`beispiele/schnittstelle.edel` — die jedes Sprachmittel verwenden — werden so zu
+nativen Programmen.
 
-*`edel übersetze` compiles to a real JVM `.class` file via the standard-library
-Class-File API. The core language (functions, primitive types, control flow,
-recursion, `wähle`) compiles to native bytecode; programs using classes,
-records, enums, lambdas or collections are rejected with a clear message and
-remain runnable via the interpreter.*
+*`edel übersetze` compiles to real JVM `.class` files via the standard-library
+Class-File API. It covers the **full language** — functions, primitive types,
+control flow, recursion, `wähle`, records, classes (incl. inheritance), enums,
+interfaces, lambdas and collections; only the `lies` input builtin stays
+interpreter-only. Every example, including the feature-complete showcases,
+compiles to a native binary.*
 
 ## Native Programme mit GraalVM / Native binaries with GraalVM
 

@@ -16,19 +16,24 @@ import kotlin.test.assertFailsWith
  */
 class CodegenTest {
 
-    private class ByteKlassenlader : ClassLoader() {
-        fun definiere(name: String, bytes: ByteArray): Class<*> =
-            defineClass(name, bytes, 0, bytes.size)
+    /** Laedt die erzeugten Klassen bei Bedarf (verschachtelte Datensaetze inbegriffen). */
+    private class ByteKlassenlader(private val klassen: Map<String, ByteArray>) : ClassLoader() {
+        private val geladen = HashMap<String, Class<*>>()
+        override fun findClass(name: String): Class<*> {
+            geladen[name]?.let { return it }
+            val bytes = klassen[name] ?: throw ClassNotFoundException(name)
+            return defineClass(name, bytes, 0, bytes.size).also { geladen[name] = it }
+        }
     }
 
     /** Uebersetzt Quelltext, fuehrt die erzeugte `start`-Methode aus, liefert deren Ausgabe. */
     private fun kompiliereUndLaufe(klassenname: String, quelle: String): String {
         val ergebnis = analysiere(quelle)
         assertEquals(emptyList(), ergebnis.diagnosen, "Quelle sollte fehlerfrei sein")
-        val bytes = Bytecodeerzeuger(
+        val klassen = Bytecodeerzeuger(
             ergebnis.programm!!, ergebnis.symbole!!, klassenname, ergebnis.parallelplan!!,
         ).kompiliere()
-        val klasse = ByteKlassenlader().definiere(klassenname, bytes)
+        val klasse = ByteKlassenlader(klassen).loadClass(klassenname)
 
         val puffer = ByteArrayOutputStream()
         val vorher = System.out
@@ -109,8 +114,142 @@ class CodegenTest {
     }
 
     @Test
+    fun uebersetztDatensaetze() {
+        // datensatz -> eigene .class; neu, Feldzugriff, Datensatz als Parameter/Rueckgabe.
+        val quelle = "datensatz Punkt(x: Ganzzahl, y: Ganzzahl)\n" +
+            "funktion verschoben(p: Punkt, dx: Ganzzahl): Punkt { zurück neu Punkt(p.x + dx, p.y) }\n" +
+            "funktion start() { sei p = verschoben(neu Punkt(3, 4), 10) drucke(p.x) drucke(p) }"
+        assertEquals("13\nPunkt(13, 4)\n", kompiliereUndLaufe("ProbeDatensatz", quelle))
+    }
+
+    @Test
+    fun uebersetztKlassen() {
+        // klasse -> eigene .class; neu, Methoden, dies, Feldzuweisung, invokevirtual.
+        val quelle = "klasse Zähler {\n" +
+            "    ver stand: Ganzzahl\n" +
+            "    funktion erhöhe() { dies.stand = dies.stand + 1 }\n" +
+            "    funktion wert(): Ganzzahl { zurück dies.stand }\n" +
+            "}\n" +
+            "funktion start() {\n" +
+            "    sei z = neu Zähler(0)\n" +
+            "    z.erhöhe() z.erhöhe() z.erhöhe()\n" +
+            "    drucke(z.wert())\n" +
+            "    drucke(z)\n" +
+            "}"
+        assertEquals("3\nZähler(stand=3)\n", kompiliereUndLaufe("ProbeKlasse", quelle))
+    }
+
+    @Test
+    fun uebersetztKlasseMitInitialisierer() {
+        // Feld mit Initialwert wird nicht Konstruktorparameter.
+        val quelle = "klasse Konto {\n" +
+            "    ver stand: Ganzzahl\n" +
+            "    sei währung: Text = \"EUR\"\n" +
+            "    funktion einzahlen(betrag: Ganzzahl) { dies.stand = dies.stand + betrag }\n" +
+            "    funktion bericht(): Text { zurück dies.stand + \" \" + dies.währung }\n" +
+            "}\n" +
+            "funktion start() { sei k = neu Konto(100) k.einzahlen(50) drucke(k.bericht()) }"
+        assertEquals("150 EUR\n", kompiliereUndLaufe("ProbeKonto", quelle))
+    }
+
+    @Test
+    fun uebersetztAufzaehlungen() {
+        // aufzählung -> eigene .class mit Singleton-Varianten; wähle ueber Varianten.
+        val quelle = "aufzählung Ampel { Rot, Gelb, Grün }\n" +
+            "funktion beschreibe(a: Ampel): Text {\n" +
+            "    zurück wähle a { fall Ampel.Rot -> \"halt\" fall Ampel.Gelb -> \"achtung\" " +
+            "sonst -> \"fahr\" }\n" +
+            "}\n" +
+            "funktion start() {\n" +
+            "    drucke(beschreibe(Ampel.Rot))\n" +
+            "    drucke(beschreibe(Ampel.Grün))\n" +
+            "    drucke(Ampel.Gelb)\n" +
+            "}"
+        assertEquals("halt\nfahr\nAmpel.Gelb\n", kompiliereUndLaufe("ProbeAmpel", quelle))
+    }
+
+    @Test
+    fun uebersetztVererbungUndSchnittstellen() {
+        // schnittstelle -> JVM-Interface; erweitert -> extends; erfüllt -> implements.
+        val quelle = "schnittstelle Form {\n" +
+            "    funktion fläche(): Kommazahl\n" +
+            "}\n" +
+            "klasse Rechteck erfüllt Form {\n" +
+            "    ver breite: Kommazahl\n" +
+            "    ver höhe: Kommazahl\n" +
+            "    funktion fläche(): Kommazahl { zurück dies.breite * dies.höhe }\n" +
+            "}\n" +
+            "klasse Quadrat erweitert Rechteck {\n" +
+            "    funktion umfang(): Kommazahl { zurück 4.0 * dies.breite }\n" +
+            "}\n" +
+            "funktion flächeVon(f: Form): Kommazahl { zurück f.fläche() }\n" +
+            "funktion start() {\n" +
+            "    drucke(flächeVon(neu Rechteck(3.0, 4.0)))\n" +
+            "    sei q = neu Quadrat(2.0, 2.0)\n" +
+            "    drucke(q.fläche())\n" +
+            "    drucke(q.umfang())\n" +
+            "    sei f: Form = q\n" +
+            "    drucke(f.fläche())\n" +
+            "    drucke(q)\n" +
+            "}"
+        assertEquals(
+            "12.0\n4.0\n8.0\n4.0\nQuadrat(breite=2.0, höhe=2.0)\n",
+            kompiliereUndLaufe("ProbeForm", quelle),
+        )
+    }
+
+    @Test
+    fun uebersetztLambdas() {
+        // Lambda -> invokedynamic; freie Variablen werden gefangen.
+        val quelle = "funktion start() {\n" +
+            "    sei verdopple = (n: Ganzzahl) -> n * 2\n" +
+            "    drucke(verdopple(21))\n" +
+            "    sei faktor = 10\n" +
+            "    sei skaliere = (x: Ganzzahl) -> x * faktor\n" +
+            "    drucke(skaliere(7))\n" +
+            "}"
+        assertEquals("42\n70\n", kompiliereUndLaufe("ProbeLambda", quelle))
+    }
+
+    @Test
+    fun uebersetztLambdaAlsArgument() {
+        // Funktionswert als Parameter und Aufruf ueber die Schnittstelle.
+        val quelle = "funktion wende(f: (Ganzzahl) -> Ganzzahl, x: Ganzzahl): Ganzzahl { zurück f(x) }\n" +
+            "funktion start() { drucke(wende((n: Ganzzahl) -> n + 1, 41)) }"
+        assertEquals("42\n", kompiliereUndLaufe("ProbeLambdaArg", quelle))
+    }
+
+    @Test
+    fun uebersetztListen() {
+        // Liste -> ArrayList; Indexzugriff, länge, hinzufügen, für-in.
+        val quelle = "funktion start() {\n" +
+            "    sei zahlen = Liste(10, 20, 30)\n" +
+            "    drucke(länge(zahlen))\n" +
+            "    drucke(zahlen[1])\n" +
+            "    zahlen.hinzufügen(40)\n" +
+            "    ver summe = 0\n" +
+            "    für z in zahlen { summe = summe + z }\n" +
+            "    drucke(summe)\n" +
+            "}"
+        assertEquals("3\n20\n100\n", kompiliereUndLaufe("ProbeListe", quelle))
+    }
+
+    @Test
+    fun uebersetztAbbildungen() {
+        // Abbildung -> LinkedHashMap aus Paaren; holen, enthält, länge.
+        val quelle = "funktion start() {\n" +
+            "    sei noten = Abbildung(Paar(\"Anna\", 1), Paar(\"Bert\", 3))\n" +
+            "    drucke(noten.holen(\"Anna\"))\n" +
+            "    drucke(noten.enthält(\"Bert\"))\n" +
+            "    drucke(länge(noten))\n" +
+            "}"
+        assertEquals("1\nwahr\n2\n", kompiliereUndLaufe("ProbeAbbildung", quelle))
+    }
+
+    @Test
     fun lehntNichtUnterstuetzteProgrammeAb() {
-        val quelle = "datensatz Punkt(x: Ganzzahl, y: Ganzzahl)\nfunktion start() { }"
+        // Eingabe ('lies') deckt das Bytecode-Backend nicht ab.
+        val quelle = "funktion start() { sei zeile = lies()  drucke(zeile) }"
         val ergebnis = analysiere(quelle)
         assertEquals(emptyList(), ergebnis.diagnosen)
         assertFailsWith<NichtUnterstützt> {
