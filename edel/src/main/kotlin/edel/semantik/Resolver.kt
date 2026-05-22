@@ -40,6 +40,7 @@ class TypAuflöser(
                 "Liste" -> if (erwarteAnzahl(1)) ListeTyp(argumente[0]) else FehlerTyp
                 "Abbildung" -> if (erwarteAnzahl(2)) AbbildungTyp(argumente[0], argumente[1]) else FehlerTyp
                 "Paar" -> if (erwarteAnzahl(2)) PaarTyp(argumente[0], argumente[1]) else FehlerTyp
+                "Ergebnis" -> if (erwarteAnzahl(1)) ErgebnisTyp(argumente[0]) else FehlerTyp
                 else -> {
                     val typ = benutzertypen[ausdruck.name]
                     if (typ == null) {
@@ -201,6 +202,7 @@ class Resolver(private val programm: Programm, private val diagnosen: DiagnoseSa
         )
 
     companion object {
-        val EINGEBAUTE_NAMEN = setOf("drucke", "lies", "länge", "Liste", "Abbildung", "Paar")
+        val EINGEBAUTE_NAMEN =
+            setOf("drucke", "lies", "länge", "Liste", "Abbildung", "Paar", "Erfolg", "Fehler")
     }
 }

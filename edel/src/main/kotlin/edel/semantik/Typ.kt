@@ -40,6 +40,17 @@ class PaarTyp(val erst: Typ, val zweit: Typ) : Typ() {
     override fun hashCode() = 31 * erst.hashCode() + zweit.hashCode()
 }
 
+/**
+ * Das Ergebnis einer fehlbaren Berechnung: entweder ein Erfolg mit einem Wert
+ * vom Typ [wert] oder ein Fehlschlag mit einer Textmeldung. `Ergebnis<Nichts>`
+ * ist der Typ eines reinen Fehlschlags und zu jedem `Ergebnis<T>` zuweisbar.
+ */
+class ErgebnisTyp(val wert: Typ) : Typ() {
+    override fun anzeige() = "Ergebnis<${wert.anzeige()}>"
+    override fun equals(other: Any?) = other is ErgebnisTyp && other.wert == wert
+    override fun hashCode() = 31 * wert.hashCode() + 5
+}
+
 class FunktionsTyp(val parameter: List<Typ>, val rückgabe: Typ) : Typ() {
     override fun anzeige() =
         "(${parameter.joinToString(", ") { it.anzeige() }}) -> ${rückgabe.anzeige()}"
@@ -133,6 +144,10 @@ fun istZuweisbar(ziel: Typ, quelle: Typ): Boolean {
     if (ziel == quelle) return true
     // Numerische Erweiterung: Ganzzahl passt in Kommazahl.
     if (ziel == KommazahlTyp && quelle == GanzzahlTyp) return true
+    // Ein reiner Fehlschlag (Ergebnis<Nichts>) passt in jedes Ergebnis<T>.
+    if (ziel is ErgebnisTyp && quelle is ErgebnisTyp) {
+        return quelle.wert == NichtsTyp || istZuweisbar(ziel.wert, quelle.wert)
+    }
     // Klassenhierarchie und Schnittstellen.
     if (quelle is KlassenTyp) {
         if (ziel is KlassenTyp && quelle.istUntertypVon(ziel)) return true

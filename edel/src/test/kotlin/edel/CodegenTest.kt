@@ -247,6 +247,23 @@ class CodegenTest {
     }
 
     @Test
+    fun uebersetztErgebnis() {
+        // Ergebnis<T> -> EdelErgebnis; Erfolg/Fehler, istFehler, wert, oderSonst, meldung.
+        val quelle = "funktion teilen(a: Ganzzahl, b: Ganzzahl): Ergebnis<Ganzzahl> {\n" +
+            "    wenn b == 0 { zurück Fehler(\"durch null\") }\n" +
+            "    zurück Erfolg(a / b)\n" +
+            "}\n" +
+            "funktion start() {\n" +
+            "    drucke(teilen(20, 4).wert())\n" +
+            "    sei schlecht = teilen(1, 0)\n" +
+            "    drucke(schlecht.istFehler())\n" +
+            "    drucke(schlecht.oderSonst(-1))\n" +
+            "    drucke(schlecht.meldung())\n" +
+            "}"
+        assertEquals("5\nwahr\n-1\ndurch null\n", kompiliereUndLaufe("ProbeErgebnis", quelle))
+    }
+
+    @Test
     fun lehntNichtUnterstuetzteProgrammeAb() {
         // Eingabe ('lies') deckt das Bytecode-Backend nicht ab.
         val quelle = "funktion start() { sei zeile = lies()  drucke(zeile) }"

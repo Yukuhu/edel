@@ -20,6 +20,9 @@ class ListeWert(val elemente: MutableList<Wert>) : Wert()
 class AbbildungWert(val eintraege: LinkedHashMap<Wert, Wert>) : Wert()
 class PaarWert(val erst: Wert, val zweit: Wert) : Wert()
 
+/** Das Ergebnis einer fehlbaren Berechnung: Erfolg mit [wert] oder Fehlschlag mit [meldung]. */
+class ErgebnisWert(val erfolg: Boolean, val wert: Wert, val meldung: String) : Wert()
+
 class DatensatzWert(val typname: String, val felder: LinkedHashMap<String, Wert>) : Wert()
 class ObjektWert(val klasse: KlasseDeklaration, val felder: LinkedHashMap<String, Wert>) : Wert()
 
@@ -81,6 +84,7 @@ fun darstelle(w: Wert): String = when (w) {
     is DatensatzWert -> w.felder.values.joinToString(", ", "${w.typname}(", ")") { darstelle(it) }
     is ObjektWert -> w.felder.entries
         .joinToString(", ", "${w.klasse.name}(", ")") { "${it.key}=${darstelle(it.value)}" }
+    is ErgebnisWert -> if (w.erfolg) "Erfolg(${darstelle(w.wert)})" else "Fehler(${w.meldung})"
     is AufzählungWert -> "${w.typname}.${w.variante}"
     is FunktionWert -> "<funktion ${w.name}>"
     is EingebauteFunktion -> "<eingebaut ${w.name}>"

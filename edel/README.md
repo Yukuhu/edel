@@ -116,7 +116,8 @@ sei text = wähle note {
 ### Eingebaute Typen / Built-in types
 
 `Ganzzahl` (64-Bit), `Kommazahl` (64-Bit), `Text`, `Wahrheit`, `Zeichen`,
-`Nichts`, sowie `Liste<T>`, `Abbildung<S,T>` und `Paar<A,B>`.
+`Nichts`, sowie `Liste<T>`, `Abbildung<S,T>`, `Paar<A,B>` und `Ergebnis<T>`
+(siehe [Fehlerbehandlung](#fehlerbehandlung--error-handling)).
 
 ```
 sei zahlen = Liste(1, 2, 3)
@@ -164,6 +165,37 @@ non-null after a null check (including inside `und`-chains and after an
 early-return guard). Nullable primitives compile to boxed JVM types
 (`Ganzzahl?`→`Long`), so null safety holds in the interpreter, the bytecode and
 the native binary alike.*
+
+### Fehlerbehandlung / Error handling
+
+Fehlbare Berechnungen liefern ein **`Ergebnis<T>`** — entweder einen Erfolg mit
+einem Wert oder einen Fehlschlag mit einer Meldung. `Ergebnis<T>` ist (wie
+`Liste<T>` oder `Paar<A, B>`) ein eingebauter generischer Typ; es braucht keine
+benutzerdefinierten Generics.
+
+```
+funktion teilen(a: Ganzzahl, b: Ganzzahl): Ergebnis<Ganzzahl> {
+    wenn b == 0 { zurück Fehler("Division durch null") }
+    zurück Erfolg(a / b)
+}
+```
+
+`Erfolg(wert)` und `Fehler("meldung")` erzeugen ein Ergebnis; ein `Fehler` passt
+in jedes `Ergebnis<T>`. Fünf Methoden werten es aus:
+
+```
+e.istErfolg()      // bzw. e.istFehler()  -> Wahrheit
+e.wert()           // der Erfolgswert     (wirft zur Laufzeit bei einem Fehlschlag)
+e.meldung()        // die Fehlermeldung   (wirft bei einem Erfolg)
+e.oderSonst(ersatz) // der Wert, oder `ersatz` bei einem Fehlschlag
+```
+
+*Fallible functions return `Ergebnis<T>` — a success carrying a value or a
+failure carrying a message. `Erfolg`/`Fehler` build one (a `Fehler` is
+assignable to any `Ergebnis<T>`); `istErfolg`/`istFehler`/`wert`/`meldung`/
+`oderSonst` consume it. Like `Liste<T>`, it is a built-in generic — no
+user-defined generics required — and works identically across interpreter,
+bytecode and native binary.*
 
 ### Schlüsselwörter / Keywords
 

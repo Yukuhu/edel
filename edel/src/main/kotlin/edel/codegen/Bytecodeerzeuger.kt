@@ -91,6 +91,9 @@ class Bytecodeerzeuger(
     // Wird gesetzt, sobald ein `Paar` vorkommt: dann wird die Klasse EdelPaar erzeugt.
     private var brauchtPaar = false
 
+    // Wird gesetzt, sobald ein `Ergebnis` vorkommt: dann wird EdelErgebnis erzeugt.
+    private var brauchtErgebnis = false
+
     // ---- Einstieg -----------------------------------------------------------
 
     fun kompiliere(): Map<String, ByteArray> {
@@ -249,6 +252,10 @@ class Bytecodeerzeuger(
         // Die Paar-Klasse, falls `Paar` vorkommt.
         if (brauchtPaar) {
             klassen["EdelPaar"] = erzeugeEdelPaar()
+        }
+        // Die Ergebnis-Klasse, falls `Ergebnis` vorkommt.
+        if (brauchtErgebnis) {
+            klassen["EdelErgebnis"] = erzeugeEdelErgebnis()
         }
         return klassen
     }
@@ -1915,6 +1922,8 @@ class Bytecodeerzeuger(
             "Liste" -> erzeugeListe(ausdruck)
             "Paar" -> erzeugePaar(ausdruck)
             "Abbildung" -> erzeugeAbbildung(ausdruck)
+            "Erfolg" -> erzeugeErfolg(ausdruck)
+            "Fehler" -> erzeugeFehler(ausdruck)
             "lies" -> ablehnen(
                 "'lies' wird vom Bytecode-Backend noch nicht unterstuetzt",
                 ausdruck.position,
@@ -1959,6 +1968,7 @@ class Bytecodeerzeuger(
         }
         val empfängerTyp = entnullt(typVon(zugriff.ziel))
         if (empfängerTyp is TextTyp || empfängerTyp is ListeTyp || empfängerTyp is AbbildungTyp ||
+            empfängerTyp is ErgebnisTyp ||
             empfängerTyp == GanzzahlTyp || empfängerTyp == KommazahlTyp ||
             empfängerTyp == WahrheitTyp || empfängerTyp == ZeichenTyp
         ) {
@@ -2110,6 +2120,7 @@ class Bytecodeerzeuger(
             TextTyp -> erzeugeTextMethode(empfänger, name, argumente, position)
             is ListeTyp -> erzeugeListeMethode(empfänger, empfängerTyp, name, argumente, position)
             is AbbildungTyp -> erzeugeAbbildungMethode(empfänger, empfängerTyp, name, argumente, position)
+            is ErgebnisTyp -> erzeugeErgebnisMethode(empfänger, empfängerTyp, name, argumente, position)
             else -> if (name == "alsText") {
                 erzeugeAlsText(empfänger)
             } else {
@@ -2286,6 +2297,187 @@ class Bytecodeerzeuger(
         }
     }
 
+    // ---- Ergebnis (Fehlerbehandlung) ----------------------------------------
+
+    /** Erzeugt `Erfolg(wert)`: ein `EdelErgebnis` mit gesetztem Erfolgs-Flag. */
+    private fun erzeugeErfolg(ausdruck: AufrufAusdruck) {
+        brauchtErgebnis = true
+        val wertTyp = typVon(ausdruck.argumente[0])
+        cob.new_(CD_EdelErgebnis)
+        cob.dup()
+        cob.iconst_1()
+        erzeugeAusdruck(ausdruck.argumente[0])
+        objektiviere(artVon(wertTyp, ausdruck.position))
+        cob.aconst_null()
+        cob.invokespecial(CD_EdelErgebnis, "<init>", CD_ergebnisKtor)
+    }
+
+    /** Erzeugt `Fehler(meldung)`: ein `EdelErgebnis` mit Fehlschlag-Flag und Meldung. */
+    private fun erzeugeFehler(ausdruck: AufrufAusdruck) {
+        brauchtErgebnis = true
+        cob.new_(CD_EdelErgebnis)
+        cob.dup()
+        cob.iconst_0()
+        cob.aconst_null()
+        erzeugeMitTyp(ausdruck.argumente[0], TextTyp)
+        cob.invokespecial(CD_EdelErgebnis, "<init>", CD_ergebnisKtor)
+    }
+
+    private fun erzeugeErgebnisMethode(
+        empfänger: Ausdruck,
+        ergebnisTyp: ErgebnisTyp,
+        name: String,
+        argumente: List<Ausdruck>,
+        position: Position,
+    ) {
+        when (name) {
+            "istErfolg" -> {
+                erzeugeAusdruck(empfänger)
+                cob.invokevirtual(CD_EdelErgebnis, "istErfolg", MethodTypeDesc.of(ConstantDescs.CD_boolean))
+            }
+            "istFehler" -> {
+                erzeugeAusdruck(empfänger)
+                cob.invokevirtual(CD_EdelErgebnis, "istFehler", MethodTypeDesc.of(ConstantDescs.CD_boolean))
+            }
+            "meldung" -> {
+                erzeugeAusdruck(empfänger)
+                cob.invokevirtual(CD_EdelErgebnis, "meldung", MethodTypeDesc.of(CD_String))
+            }
+            "wert" -> {
+                erzeugeAusdruck(empfänger)
+                cob.invokevirtual(CD_EdelErgebnis, "wert", MethodTypeDesc.of(ConstantDescs.CD_Object))
+                entObjektiviere(ergebnisTyp.wert)
+            }
+            "oderSonst" -> {
+                erzeugeAusdruck(empfänger)
+                erzeugeMitTyp(argumente[0], ergebnisTyp.wert)
+                objektiviere(artVon(ergebnisTyp.wert, position))
+                cob.invokevirtual(
+                    CD_EdelErgebnis, "oderSonst",
+                    MethodTypeDesc.of(ConstantDescs.CD_Object, ConstantDescs.CD_Object),
+                )
+                entObjektiviere(ergebnisTyp.wert)
+            }
+            else -> ablehnen("Ergebnis hat keine Methode '$name'", position)
+        }
+    }
+
+    /** Erzeugt die Klasse `EdelErgebnis` (Flag, Wert, Meldung) samt Zugriffsmethoden. */
+    private fun erzeugeEdelErgebnis(): ByteArray = ClassFile.of().build(CD_EdelErgebnis) { clb ->
+        clb.withFlags(ClassFile.ACC_PUBLIC or ClassFile.ACC_FINAL)
+        clb.withField("erfolg", ConstantDescs.CD_boolean, ClassFile.ACC_PRIVATE or ClassFile.ACC_FINAL)
+        clb.withField("wert", ConstantDescs.CD_Object, ClassFile.ACC_PRIVATE or ClassFile.ACC_FINAL)
+        clb.withField("meldung", CD_String, ClassFile.ACC_PRIVATE or ClassFile.ACC_FINAL)
+        clb.withMethodBody("<init>", CD_ergebnisKtor, ClassFile.ACC_PUBLIC) { code ->
+            code.aload(0)
+            code.invokespecial(ConstantDescs.CD_Object, "<init>", MethodTypeDesc.of(ConstantDescs.CD_void))
+            code.aload(0); code.iload(1); code.putfield(CD_EdelErgebnis, "erfolg", ConstantDescs.CD_boolean)
+            code.aload(0); code.aload(2); code.putfield(CD_EdelErgebnis, "wert", ConstantDescs.CD_Object)
+            code.aload(0); code.aload(3); code.putfield(CD_EdelErgebnis, "meldung", CD_String)
+            code.return_()
+        }
+        clb.withMethodBody("istErfolg", MethodTypeDesc.of(ConstantDescs.CD_boolean), ClassFile.ACC_PUBLIC) { code ->
+            code.aload(0)
+            code.getfield(CD_EdelErgebnis, "erfolg", ConstantDescs.CD_boolean)
+            code.ireturn()
+        }
+        clb.withMethodBody("istFehler", MethodTypeDesc.of(ConstantDescs.CD_boolean), ClassFile.ACC_PUBLIC) { code ->
+            code.aload(0)
+            code.getfield(CD_EdelErgebnis, "erfolg", ConstantDescs.CD_boolean)
+            code.iconst_1()
+            code.ixor()
+            code.ireturn()
+        }
+        clb.withMethodBody("wert", MethodTypeDesc.of(ConstantDescs.CD_Object), ClassFile.ACC_PUBLIC) { code ->
+            cob = code
+            val ok = code.newLabel()
+            code.aload(0)
+            code.getfield(CD_EdelErgebnis, "erfolg", ConstantDescs.CD_boolean)
+            code.ifne(ok)
+            wirfLaufzeitfehler {
+                cob.new_(CD_StringBuilder)
+                cob.dup()
+                cob.invokespecial(CD_StringBuilder, "<init>", MethodTypeDesc.of(ConstantDescs.CD_void))
+                anhängenText("Ergebnis ist ein Fehler: ")
+                cob.aload(0)
+                cob.getfield(CD_EdelErgebnis, "meldung", CD_String)
+                cob.invokevirtual(CD_StringBuilder, "append", MethodTypeDesc.of(CD_StringBuilder, CD_String))
+                cob.invokevirtual(CD_StringBuilder, "toString", MethodTypeDesc.of(CD_String))
+            }
+            code.labelBinding(ok)
+            code.aload(0)
+            code.getfield(CD_EdelErgebnis, "wert", ConstantDescs.CD_Object)
+            code.areturn()
+        }
+        clb.withMethodBody("meldung", MethodTypeDesc.of(CD_String), ClassFile.ACC_PUBLIC) { code ->
+            cob = code
+            val ok = code.newLabel()
+            code.aload(0)
+            code.getfield(CD_EdelErgebnis, "erfolg", ConstantDescs.CD_boolean)
+            code.ifeq(ok)
+            wirfLaufzeitfehler { ladeText("Ergebnis ist ein Erfolg, keine Fehlermeldung vorhanden") }
+            code.labelBinding(ok)
+            code.aload(0)
+            code.getfield(CD_EdelErgebnis, "meldung", CD_String)
+            code.areturn()
+        }
+        clb.withMethodBody(
+            "oderSonst", MethodTypeDesc.of(ConstantDescs.CD_Object, ConstantDescs.CD_Object),
+            ClassFile.ACC_PUBLIC,
+        ) { code ->
+            val sonst = code.newLabel()
+            code.aload(0)
+            code.getfield(CD_EdelErgebnis, "erfolg", ConstantDescs.CD_boolean)
+            code.ifeq(sonst)
+            code.aload(0)
+            code.getfield(CD_EdelErgebnis, "wert", ConstantDescs.CD_Object)
+            code.areturn()
+            code.labelBinding(sonst)
+            code.aload(1)
+            code.areturn()
+        }
+        clb.withMethodBody("toString", MethodTypeDesc.of(CD_String), ClassFile.ACC_PUBLIC) { code ->
+            cob = code
+            val fehlerFall = code.newLabel()
+            code.aload(0)
+            code.getfield(CD_EdelErgebnis, "erfolg", ConstantDescs.CD_boolean)
+            code.ifeq(fehlerFall)
+            cob.new_(CD_StringBuilder)
+            cob.dup()
+            cob.invokespecial(CD_StringBuilder, "<init>", MethodTypeDesc.of(ConstantDescs.CD_void))
+            anhängenText("Erfolg(")
+            cob.aload(0)
+            cob.getfield(CD_EdelErgebnis, "wert", ConstantDescs.CD_Object)
+            cob.invokestatic(CD_String, "valueOf", MethodTypeDesc.of(CD_String, ConstantDescs.CD_Object))
+            cob.invokevirtual(CD_StringBuilder, "append", MethodTypeDesc.of(CD_StringBuilder, CD_String))
+            anhängenText(")")
+            cob.invokevirtual(CD_StringBuilder, "toString", MethodTypeDesc.of(CD_String))
+            cob.areturn()
+            code.labelBinding(fehlerFall)
+            cob.new_(CD_StringBuilder)
+            cob.dup()
+            cob.invokespecial(CD_StringBuilder, "<init>", MethodTypeDesc.of(ConstantDescs.CD_void))
+            anhängenText("Fehler(")
+            cob.aload(0)
+            cob.getfield(CD_EdelErgebnis, "meldung", CD_String)
+            cob.invokevirtual(CD_StringBuilder, "append", MethodTypeDesc.of(CD_StringBuilder, CD_String))
+            anhängenText(")")
+            cob.invokevirtual(CD_StringBuilder, "toString", MethodTypeDesc.of(CD_String))
+            cob.areturn()
+        }
+    }
+
+    /** Erzeugt `throw new RuntimeException(meldung)`; [meldung] legt den String auf den Stapel. */
+    private fun wirfLaufzeitfehler(meldung: () -> Unit) {
+        cob.new_(CD_RuntimeException)
+        cob.dup()
+        meldung()
+        cob.invokespecial(
+            CD_RuntimeException, "<init>", MethodTypeDesc.of(ConstantDescs.CD_void, CD_String),
+        )
+        cob.athrow()
+    }
+
     private fun erzeugeDrucke(argument: Ausdruck) {
         cob.getstatic(CD_System, "out", CD_PrintStream)
         val art = artVon(typVon(argument), argument.position)
@@ -2382,6 +2574,8 @@ class Bytecodeerzeuger(
                                 paare.map { it.zweit }.reduceOrNull { a, b -> gemeinsamerTyp(a, b) } ?: FehlerTyp,
                             )
                         }
+                        ziel.name == "Erfolg" -> ErgebnisTyp(typVon(ausdruck.argumente[0]))
+                        ziel.name == "Fehler" -> ErgebnisTyp(NichtsTyp)
                         else -> symbole.funktionen[ziel.name]?.rückgabe
                             ?: ablehnen("Unbekannte Funktion: '${ziel.name}'", ausdruck.position)
                     }
@@ -2476,6 +2670,7 @@ class Bytecodeerzeuger(
         is ListeTyp -> CD_List
         is AbbildungTyp -> CD_Map
         is PaarTyp -> { brauchtPaar = true; CD_EdelPaar }
+        is ErgebnisTyp -> { brauchtErgebnis = true; CD_EdelErgebnis }
         is NullbarTyp -> when (val basis = typ.basis) {
             GanzzahlTyp -> CD_Long
             KommazahlTyp -> CD_Double
@@ -2490,6 +2685,7 @@ class Bytecodeerzeuger(
             is ListeTyp -> CD_List
             is AbbildungTyp -> CD_Map
             is PaarTyp -> { brauchtPaar = true; CD_EdelPaar }
+            is ErgebnisTyp -> { brauchtErgebnis = true; CD_EdelErgebnis }
             else -> ablehnen("Der Typ '$typ' wird vom Bytecode-Backend nicht unterstuetzt", Position(0, 0))
         }
         else -> ablehnen("Der Typ '$typ' wird vom Bytecode-Backend nicht unterstuetzt", Position(0, 0))
@@ -2521,7 +2717,7 @@ class Bytecodeerzeuger(
         is AufzählungTyp -> Art.OBJEKT
         is SchnittstellenTyp -> Art.OBJEKT
         is FunktionsTyp -> Art.OBJEKT
-        is ListeTyp, is AbbildungTyp, is PaarTyp -> Art.OBJEKT
+        is ListeTyp, is AbbildungTyp, is PaarTyp, is ErgebnisTyp -> Art.OBJEKT
         is NullbarTyp -> when (typ.basis) {
             GanzzahlTyp -> Art.N_GANZ
             KommazahlTyp -> Art.N_KOMMA
@@ -2533,7 +2729,7 @@ class Bytecodeerzeuger(
             is AufzählungTyp -> Art.OBJEKT
             is SchnittstellenTyp -> Art.OBJEKT
             is FunktionsTyp -> Art.OBJEKT
-            is ListeTyp, is AbbildungTyp, is PaarTyp -> Art.OBJEKT
+            is ListeTyp, is AbbildungTyp, is PaarTyp, is ErgebnisTyp -> Art.OBJEKT
             else -> ablehnen(
                 "Der Typ '$typ' wird vom Bytecode-Backend (Kern) nicht unterstuetzt",
                 position,
@@ -2688,6 +2884,13 @@ class Bytecodeerzeuger(
         val CD_ObjectArray: ClassDesc = ClassDesc.ofDescriptor("[Ljava/lang/Object;")
         val CD_CharSequence: ClassDesc = ClassDesc.of("java.lang.CharSequence")
         val CD_EdelPaar: ClassDesc = ClassDesc.of("EdelPaar")
+        val CD_EdelErgebnis: ClassDesc = ClassDesc.of("EdelErgebnis")
+        val CD_RuntimeException: ClassDesc = ClassDesc.of("java.lang.RuntimeException")
+
+        /** Konstruktordeskriptor von EdelErgebnis: (Wahrheit, Wert, Meldung). */
+        val CD_ergebnisKtor: MethodTypeDesc = MethodTypeDesc.of(
+            ConstantDescs.CD_void, ConstantDescs.CD_boolean, ConstantDescs.CD_Object, CD_String,
+        )
 
         /** Bootstrap-Methode java.lang.invoke.LambdaMetafactory.metafactory fuer invokedynamic. */
         val METAFACTORY: DirectMethodHandleDesc = MethodHandleDesc.ofMethod(

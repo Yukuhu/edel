@@ -75,6 +75,12 @@ class Interpreter(
             }
             AbbildungWert(eintraege)
         })
+        global.definiere("Erfolg", EingebauteFunktion("Erfolg") { args ->
+            ErgebnisWert(erfolg = true, wert = args[0], meldung = "")
+        })
+        global.definiere("Fehler", EingebauteFunktion("Fehler") { args ->
+            ErgebnisWert(erfolg = false, wert = NichtsWert, meldung = (args[0] as TextWert).wert)
+        })
 
         for (d in programm.deklarationen) {
             when (d) {
@@ -697,6 +703,7 @@ class Interpreter(
             is TextWert -> textMethode(basis, name, argumente)
             is ListeWert -> listeMethode(basis, name, argumente)
             is AbbildungWert -> abbildungMethode(basis, name, argumente)
+            is ErgebnisWert -> ergebnisMethode(basis, name, argumente)
             is GanzzahlWert, is KommazahlWert, is WahrheitWert, is ZeichenWert ->
                 if (name == "alsText") TextWert(darstelle(basis))
                 else throw LaufzeitFehler("${darstelle(basis)} hat keine Methode '$name'")
@@ -759,6 +766,24 @@ class Interpreter(
             }
             "schlüssel" -> ListeWert(basis.eintraege.keys.toMutableList())
             else -> throw LaufzeitFehler("Abbildung hat keine Methode '$name'")
+        }
+
+    private fun ergebnisMethode(basis: ErgebnisWert, name: String, argumente: List<Wert>): Wert =
+        when (name) {
+            "istErfolg" -> WahrheitWert(basis.erfolg)
+            "istFehler" -> WahrheitWert(!basis.erfolg)
+            "wert" -> if (basis.erfolg) {
+                basis.wert
+            } else {
+                throw LaufzeitFehler("Ergebnis ist ein Fehler: ${basis.meldung}")
+            }
+            "meldung" -> if (!basis.erfolg) {
+                TextWert(basis.meldung)
+            } else {
+                throw LaufzeitFehler("Ergebnis ist ein Erfolg, keine Fehlermeldung vorhanden")
+            }
+            "oderSonst" -> if (basis.erfolg) basis.wert else argumente[0]
+            else -> throw LaufzeitFehler("Ergebnis hat keine Methode '$name'")
         }
 
     // ---- Kleine Hilfen ------------------------------------------------------

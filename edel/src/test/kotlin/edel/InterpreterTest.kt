@@ -2,6 +2,7 @@ package edel
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 
 class InterpreterTest {
 
@@ -20,6 +21,28 @@ class InterpreterTest {
     @Test
     fun rechnetMitGanzzahlen() {
         assertEquals(listOf("14"), laufe("funktion start() { drucke(2 + 3 * 4) }"))
+    }
+
+    @Test
+    fun ergebnisErfolgUndFehler() {
+        val quelle = "funktion sicher(n: Ganzzahl): Ergebnis<Ganzzahl> {\n" +
+            "    wenn n < 0 { zurück Fehler(\"negativ\") }\n" +
+            "    zurück Erfolg(n * 2)\n" +
+            "}\n" +
+            "funktion start() {\n" +
+            "    drucke(sicher(5).wert())\n" +
+            "    drucke(sicher(-1).istFehler())\n" +
+            "    drucke(sicher(-1).oderSonst(0))\n" +
+            "    drucke(sicher(-1).meldung())\n" +
+            "}"
+        assertEquals(listOf("10", "wahr", "0", "negativ"), laufe(quelle))
+    }
+
+    @Test
+    fun ergebnisWertWirftBeiFehlschlag() {
+        assertFailsWith<edel.fehler.LaufzeitFehler> {
+            laufe("funktion start() { sei e: Ergebnis<Ganzzahl> = Fehler(\"weg\")  drucke(e.wert()) }")
+        }
     }
 
     @Test

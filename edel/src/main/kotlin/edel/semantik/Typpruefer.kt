@@ -667,6 +667,28 @@ class Typpruefer(
                     return PaarTyp(a, b)
                 }
                 "Abbildung" -> return prüfeAbbildungKonstruktor(ausdruck, bereich, erwartet)
+                "Erfolg" -> {
+                    if (ausdruck.argumente.size != 1) {
+                        diagnosen.melde("'Erfolg' erwartet genau ein Argument", ausdruck.position)
+                        return FehlerTyp
+                    }
+                    val erwarteterWert = (erwartet as? ErgebnisTyp)?.wert
+                    return ErgebnisTyp(prüfeAusdruck(ausdruck.argumente[0], bereich, erwarteterWert))
+                }
+                "Fehler" -> {
+                    if (ausdruck.argumente.size != 1) {
+                        diagnosen.melde("'Fehler' erwartet genau ein Argument", ausdruck.position)
+                        return FehlerTyp
+                    }
+                    val meldung = prüfeAusdruck(ausdruck.argumente[0], bereich, TextTyp)
+                    if (!istZuweisbar(TextTyp, meldung)) {
+                        diagnosen.melde(
+                            "'Fehler' erwartet eine Textmeldung, erhielt $meldung",
+                            ausdruck.argumente[0].position,
+                        )
+                    }
+                    return ErgebnisTyp(NichtsTyp)
+                }
             }
         }
         // Methodenaufruf.
@@ -957,6 +979,13 @@ class Typpruefer(
                 "setze" -> FunktionsTyp(listOf(basis.schlüssel, basis.wert), NichtsTyp)
                 "enthält" -> FunktionsTyp(listOf(basis.schlüssel), WahrheitTyp)
                 "schlüssel" -> FunktionsTyp(emptyList(), ListeTyp(basis.schlüssel))
+                else -> null
+            }
+            is ErgebnisTyp -> when (name) {
+                "istErfolg", "istFehler" -> FunktionsTyp(emptyList(), WahrheitTyp)
+                "wert" -> FunktionsTyp(emptyList(), basis.wert)
+                "meldung" -> FunktionsTyp(emptyList(), TextTyp)
+                "oderSonst" -> FunktionsTyp(listOf(basis.wert), basis.wert)
                 else -> null
             }
             GanzzahlTyp, KommazahlTyp, WahrheitTyp, ZeichenTyp ->

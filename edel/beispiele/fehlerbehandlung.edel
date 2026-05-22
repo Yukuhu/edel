@@ -1,0 +1,37 @@
+// Fehlerbehandlung mit Ergebnis<T>.
+//
+//  - Eine fehlbare Funktion liefert Ergebnis<T>: Erfolg(wert) oder Fehler(meldung).
+//  - istErfolg / istFehler prüfen, wert / meldung lesen aus,
+//    oderSonst liefert bei einem Fehlschlag einen Ersatzwert.
+
+funktion teilen(zähler: Ganzzahl, nenner: Ganzzahl): Ergebnis<Ganzzahl> {
+    wenn nenner == 0 {
+        zurück Fehler("Division durch null")
+    }
+    zurück Erfolg(zähler / nenner)
+}
+
+funktion wurzelnah(n: Ganzzahl): Ergebnis<Ganzzahl> {
+    wenn n < 0 {
+        zurück Fehler("negative Zahl hat keine Wurzel")
+    }
+    ver i = 0
+    solange i * i <= n {
+        i = i + 1
+    }
+    zurück Erfolg(i - 1)
+}
+
+funktion start() {
+    sei gut = teilen(20, 4)
+    wenn gut.istErfolg() {
+        drucke("20 / 4 = " + gut.wert())
+    }
+
+    sei schlecht = teilen(7, 0)
+    drucke("7 / 0 -> " + schlecht.meldung())
+    drucke("mit Ersatzwert: " + schlecht.oderSonst(0))
+
+    drucke("Wurzel von 49: " + wurzelnah(49).wert())
+    drucke(wurzelnah(-1).istFehler())
+}
