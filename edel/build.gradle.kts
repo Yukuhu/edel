@@ -3,6 +3,9 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 plugins {
     kotlin("jvm") version "2.2.21"
     application
+    // Offizielles GraalVM-Plugin: liefert die Aufgaben nativeCompile / nativeRun
+    // und uebersetzt das Werkzeug aus dem echten Klassenpfad zu einem Binaerprogramm.
+    id("org.graalvm.buildtools.native") version "1.1.0"
 }
 
 group = "edel"
@@ -44,17 +47,32 @@ tasks.test {
     }
 }
 
-// Eigenstaendiges, ausfuehrbares Jar (ersetzt das Shadow-Plugin, damit der Build
-// offline und ohne Drittanbieter-Plugin funktioniert).
+// ---------------------------------------------------------------------------
+// Eigenstaendiges, ausfuehrbares Jar
+// ---------------------------------------------------------------------------
+// Ein Uber-Jar mit eingebetteter Kotlin-Standardbibliothek (ohne Shadow-Plugin,
+// damit keine weitere Drittanbieter-Abhaengigkeit noetig ist). Edel besitzt
+// keine SPI-Dienste, daher genuegt es, Signaturen und module-info auszuschliessen.
 tasks.register<Jar>("fatJar") {
     group = "build"
     description = "Baut ein eigenstaendiges edel.jar mit eingebetteter Kotlin-Standardbibliothek."
     archiveFileName = "edel.jar"
     destinationDirectory = layout.buildDirectory.dir("libs")
     manifest {
-        attributes["Main-Class"] = "edel.MainKt"
+        attributes(
+            "Main-Class" to "edel.MainKt",
+            "Implementation-Title" to "Edel",
+            "Implementation-Version" to project.version.toString(),
+        )
     }
+    // Reproduzierbare, stabile Jars (gleiche Eingabe -> gleiche Bytes).
+    isReproducibleFileOrder = true
+    isPreserveFileTimestamps = false
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    // Signaturdateien und Modul-Deskriptoren der Abhaengigkeiten wuerden das
+    // zusammengefuehrte Jar ungueltig machen.
+    exclude("META-INF/*.SF", "META-INF/*.DSA", "META-INF/*.RSA", "META-INF/SIG-*")
+    exclude("module-info.class", "META-INF/versions/*/module-info.class")
     from(sourceSets.main.get().output)
     dependsOn(configurations.runtimeClasspath)
     from({
@@ -68,21 +86,26 @@ tasks.named("build") {
     dependsOn("fatJar")
 }
 
-// Uebersetzt das edel-Werkzeug selbst mit GraalVM native-image zu einem
-// eigenstaendigen, schnell startenden Binaerprogramm (build/edel).
-tasks.register<Exec>("nativeCompile") {
-    group = "build"
-    description = "Baut das edel-Werkzeug als GraalVM-Native-Image (build/edel)."
-    dependsOn("fatJar")
-    val jar = layout.buildDirectory.file("libs/edel.jar").get().asFile
-    val ausgabe = layout.buildDirectory.file("edel").get().asFile
-    val nativeImage = File(System.getProperty("java.home"), "bin/native-image")
-    commandLine(
-        if (nativeImage.isFile) nativeImage.absolutePath else "native-image",
-        "--no-fallback",
-        "-jar", jar.absolutePath,
-        "-o", ausgabe.absolutePath,
-    )
-    doFirst { ausgabe.parentFile.mkdirs() }
-    doLast { println("Natives edel-Werkzeug erzeugt: ${ausgabe.path}") }
+// ---------------------------------------------------------------------------
+// Natives Binaerprogramm (GraalVM Native Build Tools)
+// ---------------------------------------------------------------------------
+// Das Plugin stellt die Aufgaben `nativeCompile` (Binaerprogramm bauen) und
+// `nativeRun` (bauen und starten) bereit. Das Ergebnis liegt unter
+// build/native/nativeCompile/edel.
+graalvmNative {
+    // Die Gradle-JVM ist bereits ein GraalVM-JDK (GRAALVM_HOME ist gesetzt);
+    // es muss daher keine separate Toolchain gesucht werden.
+    toolchainDetection = false
+    // Edel haengt nur von der Kotlin-Standardbibliothek ab; es werden keine
+    // Erreichbarkeits-Metadaten aus dem GraalVM-Repository benoetigt.
+    metadataRepository {
+        enabled = false
+    }
+    binaries {
+        named("main") {
+            imageName = "edel"
+            mainClass = "edel.MainKt"
+            buildArgs.add("--no-fallback")
+        }
+    }
 }

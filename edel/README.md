@@ -13,12 +13,13 @@ keyword is German. It runs on the JVM (Java 25+) via a tree-walking interpreter.
 
 ```bash
 ./gradlew build           # kompiliert, testet, erzeugt build/libs/edel.jar
-./gradlew nativeCompile   # baut das edel-Werkzeug selbst als GraalVM-Binärprogramm (build/edel)
+./gradlew nativeCompile   # baut das edel-Werkzeug als GraalVM-Binärprogramm
 ./bin/edel starte beispiele/fakultät.edel
 ```
 
-`bin/edel` benutzt automatisch das native `build/edel`, falls vorhanden, sonst
-das Jar. *Run `./gradlew nativeCompile` once and the `edel` tool itself becomes a
+`./gradlew nativeCompile` (Aufgabe des offiziellen GraalVM-Plugins) erzeugt das
+Binärprogramm unter `build/native/nativeCompile/edel`. `bin/edel` benutzt dieses
+native Programm automatisch, falls vorhanden, sonst das Jar. *Run `./gradlew nativeCompile` once and the `edel` tool itself becomes a
 native GraalVM executable.*
 
 Befehle des `edel`-Werkzeugs / commands of the `edel` tool:

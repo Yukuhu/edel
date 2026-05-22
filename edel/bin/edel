@@ -4,7 +4,7 @@
 set -euo pipefail
 
 WURZEL="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-NATIV="$WURZEL/build/edel"
+NATIV="$WURZEL/build/native/nativeCompile/edel"
 JAR="$WURZEL/build/libs/edel.jar"
 
 if [[ -x "$NATIV" ]]; then
