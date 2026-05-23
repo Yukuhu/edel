@@ -314,28 +314,34 @@ private fun befehlPrüfe(argumente: Array<String>) {
     }
 }
 
-/** Uebersetzt die Quelldatei zu JVM-Bytecode und liefert (Quelldatei, Klassenname -> Bytes). */
-private fun kompiliereZuBytecode(argumente: Array<String>): Pair<File, Map<String, ByteArray>> {
+/** Ergebnis der Bytecode-Uebersetzung: erzeugte Klassen samt FQN-Metadaten. */
+private class Übersetzung(
+    val quelldatei: File,
+    /** Wurzelverzeichnis (entry-dir, ggf. um die paket-Tiefe hochgeklettert). */
+    val quellwurzel: File,
+    /** FQN der Hauptklasse, z. B. `app.main` oder `fibonacci`. */
+    val hauptklasse: String,
+    /** Erzeugte Klassen, FQN -> Bytes. */
+    val klassen: Map<String, ByteArray>,
+)
+
+/** Uebersetzt das Projekt zu JVM-Bytecode -- inklusive Mehrdatei-Modulen. */
+private fun kompiliereZuBytecode(argumente: Array<String>): Übersetzung {
     val analyse = analysiereDateiOderBeende(argumente)
-
-    // Phase 1 der Modul-Unterstuetzung deckt nur den Interpreter ab. Mehrdatei-
-    // bzw. paketierte Programme werden vom Bytecode-Backend (noch) nicht uebersetzt.
-    val eintragsInfo = parsePaketUndImporte(analyse.eintrag)
-    if (eintragsInfo.paket != null || eintragsInfo.importe.isNotEmpty()) {
-        System.err.println(
-            "Fehler: Das Bytecode-Backend unterstuetzt 'paket'/'importiere' noch nicht. " +
-                "Mehrdatei-Programme laufen mit 'edel starte'.",
-        )
-        exitProcess(1)
-    }
-
     prüfeStartVorhanden(analyse.ergebnis.programm!!, analyse.eintragsStart)
+
     val quelldatei = analyse.eintrag
-    val klassenname = quelldatei.nameWithoutExtension
+    val quellwurzel = quellwurzel(quelldatei, analyse.eintragspaket)
+    val hauptklasse = if (analyse.eintragspaket.isNullOrEmpty()) {
+        quelldatei.nameWithoutExtension
+    } else {
+        "${analyse.eintragspaket}.${quelldatei.nameWithoutExtension}"
+    }
     val klassen = try {
         Bytecodeerzeuger(
             analyse.ergebnis.programm, analyse.ergebnis.symbole!!,
-            klassenname, analyse.ergebnis.parallelplan!!,
+            hauptklasse, analyse.ergebnis.parallelplan!!,
+            eintragsStart = analyse.eintragsStart,
         ).kompiliere()
     } catch (fehler: NichtUnterstützt) {
         System.err.println(fehler.diagnose.formatiert())
@@ -345,36 +351,39 @@ private fun kompiliereZuBytecode(argumente: Array<String>): Pair<File, Map<Strin
         )
         exitProcess(1)
     }
-    return quelldatei to klassen
+    return Übersetzung(quelldatei, quellwurzel, hauptklasse, klassen)
+}
+
+/** Schreibt eine Klasse `a.b.Foo` als `<wurzel>/a/b/Foo.class` (mit mkdirs). */
+private fun schreibeKlasse(wurzel: File, fqn: String, bytes: ByteArray) {
+    val ziel = File(wurzel, fqn.replace('.', '/') + ".class")
+    ziel.parentFile?.mkdirs()
+    ziel.writeBytes(bytes)
 }
 
 private fun befehlÜbersetze(argumente: Array<String>) {
-    val (quelldatei, klassen) = kompiliereZuBytecode(argumente)
-    val hauptklasse = quelldatei.nameWithoutExtension
-    for ((name, bytes) in klassen) {
-        File(quelldatei.parentFile, "$name.class").writeBytes(bytes)
-    }
-    println("Erzeugt: ${klassen.keys.joinToString(", ") { "$it.class" }}")
-    println("Ausfuehren mit:  java -cp \"${quelldatei.parent}\" $hauptklasse")
+    val ü = kompiliereZuBytecode(argumente)
+    for ((fqn, bytes) in ü.klassen) schreibeKlasse(ü.quellwurzel, fqn, bytes)
+    println("Erzeugt: ${ü.klassen.keys.joinToString(", ") { it.replace('.', '/') + ".class" }}")
+    println("Ausfuehren mit:  java -cp \"${ü.quellwurzel.path}\" ${ü.hauptklasse}")
 }
 
 private fun befehlBinär(argumente: Array<String>) {
-    val (quelldatei, klassen) = kompiliereZuBytecode(argumente)
-    val klassenname = quelldatei.nameWithoutExtension
+    val ü = kompiliereZuBytecode(argumente)
     val arbeitsverzeichnis = Files.createTempDirectory("edel-binaer").toFile()
     try {
-        for ((name, bytes) in klassen) {
-            File(arbeitsverzeichnis, "$name.class").writeBytes(bytes)
-        }
-        val zieldatei = File(quelldatei.parentFile, klassenname)
+        for ((fqn, bytes) in ü.klassen) schreibeKlasse(arbeitsverzeichnis, fqn, bytes)
+        // Die Binaerdatei nimmt den Kurznamen der Einstiegsdatei -- ohne Punkte
+        // bleibt der Pfad bedienbar.
+        val zieldatei = File(ü.quelldatei.parentFile, ü.quelldatei.nameWithoutExtension)
         val nativeImage = findeNativeImage()
-        println("Uebersetze '${quelldatei.name}' mit GraalVM native-image ...")
+        println("Uebersetze '${ü.quelldatei.name}' mit GraalVM native-image ...")
         val exitcode = try {
             ProcessBuilder(
                 nativeImage,
                 "--no-fallback",
                 "-cp", arbeitsverzeichnis.absolutePath,
-                klassenname,
+                ü.hauptklasse,
                 "-o", zieldatei.absolutePath,
             ).inheritIO().start().waitFor()
         } catch (fehler: IOException) {

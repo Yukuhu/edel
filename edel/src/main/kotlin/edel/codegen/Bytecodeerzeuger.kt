@@ -39,7 +39,16 @@ class Bytecodeerzeuger(
     private val symbole: GlobaleSymbole,
     private val klassenname: String,
     private val parallelplan: Parallelplan = Parallelplan(emptyMap()),
+    /** FQN der Einstiegsfunktion -- Standard `start` (unbenanntes Paket). */
+    private val eintragsStart: String = "start",
 ) {
+    /**
+     * JVM-Methodenname zu einem vollqualifizierten Edel-Namen. JVM-Methodennamen
+     * duerfen keine Punkte enthalten, daher kodieren wir Paketgrenzen als `$`
+     * -- vereinbarter Edel-Bezeichnerzeichensatz erlaubt kein `$`, deshalb
+     * sind Kollisionen mit von Benutzern geschriebenen Namen ausgeschlossen.
+     */
+    private fun jvm(fqn: String): String = fqn.replace('.', '$')
     // Nicht-nullbare Grundarten, ihre nullbaren (geboxten) Gegenstuecke sowie
     // OBJEKT fuer Referenzen auf Datensatz-Klassen.
     private enum class Art {
@@ -151,18 +160,18 @@ class Bytecodeerzeuger(
 
         klassen[klassenname] = ClassFile.of().build(selbst) { clb ->
             clb.withFlags(ClassFile.ACC_PUBLIC or ClassFile.ACC_FINAL)
-            // Einsprungpunkt: main ruft die Edel-Funktion start auf.
+            // Einsprungpunkt: main ruft die Edel-Funktion `start` auf.
             clb.withMethodBody(
                 "main",
                 MethodTypeDesc.of(ConstantDescs.CD_void, ClassDesc.ofDescriptor("[Ljava/lang/String;")),
                 ClassFile.ACC_PUBLIC or ClassFile.ACC_STATIC,
             ) { code ->
-                code.invokestatic(selbst, "start", MethodTypeDesc.of(ConstantDescs.CD_void))
+                code.invokestatic(selbst, jvm(eintragsStart), MethodTypeDesc.of(ConstantDescs.CD_void))
                 code.return_()
             }
             for (funktion in funktionen) {
                 clb.withMethodBody(
-                    funktion.name,
+                    jvm(funktion.name),
                     deskriptor(funktion.name),
                     ClassFile.ACC_PUBLIC or ClassFile.ACC_STATIC,
                 ) { code ->
@@ -1936,7 +1945,7 @@ class Bytecodeerzeuger(
                 ausdruck.argumente.forEachIndexed { i, argument ->
                     erzeugeMitTyp(argument, signatur.parameter[i])
                 }
-                cob.invokestatic(selbst, fqn, deskriptor(fqn))
+                cob.invokestatic(selbst, jvm(fqn), deskriptor(fqn))
             }
         }
     }

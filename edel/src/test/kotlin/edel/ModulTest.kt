@@ -1,7 +1,10 @@
 package edel
 
+import edel.codegen.Bytecodeerzeuger
 import edel.laufzeit.Interpreter
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.PrintStream
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -133,6 +136,117 @@ class ModulTest {
         assertTrue(
             ergebnis.diagnosen.any { "gemein.hilf" in it.meldung },
             "Erwarte Kollisions-Diagnose, erhielt: ${ergebnis.diagnosen}",
+        )
+    }
+
+    /** Laedt FQN-Klassen aus einem byte-Map -- Klassennamen koennen Punkte enthalten. */
+    private class ByteKlassenlader(private val klassen: Map<String, ByteArray>) : ClassLoader() {
+        private val geladen = HashMap<String, Class<*>>()
+        override fun findClass(name: String): Class<*> {
+            geladen[name]?.let { return it }
+            val bytes = klassen[name] ?: throw ClassNotFoundException(name)
+            return defineClass(name, bytes, 0, bytes.size).also { geladen[name] = it }
+        }
+    }
+
+    /** Uebersetzt das Projekt zu Bytecode, laedt die Hauptklasse und ruft `main([])` auf. */
+    private fun kompiliereUndLaufe(
+        quellen: Map<String, String>,
+        eintrag: String,
+        hauptklasse: String,
+        startFqn: String,
+    ): String {
+        val ergebnis = analysiereProjekt(quellen, eintrag)
+        assertEquals(emptyList(), ergebnis.diagnosen, "Projekt sollte fehlerfrei sein")
+        val klassen = Bytecodeerzeuger(
+            ergebnis.programm!!, ergebnis.symbole!!, hauptklasse, ergebnis.parallelplan!!,
+            eintragsStart = startFqn,
+        ).kompiliere()
+        val klasse = ByteKlassenlader(klassen).loadClass(hauptklasse)
+        val puffer = ByteArrayOutputStream()
+        val vorher = System.out
+        System.setOut(PrintStream(puffer, true, "UTF-8"))
+        try {
+            // `main(String[])` ruft intern die Edel-Einstiegsfunktion auf.
+            klasse.getMethod("main", Array<String>::class.java).invoke(null, emptyArray<String>())
+        } finally {
+            System.setOut(vorher)
+        }
+        return puffer.toString("UTF-8")
+    }
+
+    @Test
+    fun bytecodeUebersetztMehrdateiProjekt() {
+        val quellen = mapOf(
+            "main.edel" to """
+                importiere geometrie.Punkt
+                importiere geometrie.verschiebe
+                funktion start() {
+                    sei a = neu Punkt(1, 2)
+                    sei b = verschiebe(a, 10, 20)
+                    drucke(b.x)
+                    drucke(b.y)
+                }
+            """.trimIndent(),
+            "geometrie/punkt.edel" to """
+                paket geometrie
+                datensatz Punkt(x: Ganzzahl, y: Ganzzahl)
+                funktion verschiebe(p: Punkt, dx: Ganzzahl, dy: Ganzzahl): Punkt {
+                    zurück neu Punkt(p.x + dx, p.y + dy)
+                }
+            """.trimIndent(),
+        )
+        assertEquals(
+            "11\n22\n",
+            kompiliereUndLaufe(
+                quellen, eintrag = "main.edel",
+                hauptklasse = "main", startFqn = "start",
+            ),
+        )
+    }
+
+    @Test
+    fun bytecodeUebersetztPaketiertesEinstiegsprogramm() {
+        val quellen = mapOf(
+            "anwendung/main.edel" to """
+                paket anwendung
+                funktion verdopple(n: Ganzzahl): Ganzzahl { zurück n * 2 }
+                funktion start() { drucke(verdopple(21)) }
+            """.trimIndent(),
+        )
+        assertEquals(
+            "42\n",
+            kompiliereUndLaufe(
+                quellen, eintrag = "anwendung/main.edel",
+                hauptklasse = "anwendung.main", startFqn = "anwendung.start",
+            ),
+        )
+    }
+
+    @Test
+    fun bytecodeUebersetztDatensaetzeAusFremdemPaket() {
+        // Cross-Paket-Aufruf: `neu Punkt(...)` und Feldzugriff `.x` ueber Modulgrenze.
+        val quellen = mapOf(
+            "haupt.edel" to """
+                importiere zahlen.Paar2
+                importiere zahlen.summe
+                funktion start() {
+                    sei p = neu Paar2(7, 8)
+                    drucke(summe(p))
+                }
+            """.trimIndent(),
+            "zahlen/paar.edel" to """
+                paket zahlen
+                datensatz Paar2(a: Ganzzahl, b: Ganzzahl)
+                funktion summe(p: Paar2): Ganzzahl { zurück p.a + p.b }
+            """.trimIndent(),
+        )
+        assertEquals(
+            "15\n",
+            kompiliereUndLaufe(
+                quellen, eintrag = "haupt.edel",
+                hauptklasse = "haupt", startFqn = "start",
+            ),
         )
     }
 

@@ -235,18 +235,29 @@ Regeln:
   ohne Vorbereitung wie bisher.
 
 ```bash
-./bin/edel starte beispiele/module/main.edel    # alle Module werden geladen
-./bin/edel prüfe  beispiele/module/main.edel    # Typprüfung über alle Module
+./bin/edel starte    beispiele/module/main.edel    # alle Module werden geladen
+./bin/edel prüfe     beispiele/module/main.edel    # Typprüfung über alle Module
+./bin/edel übersetze beispiele/module/main.edel    # main.class + geometrie/Punkt.class
+java -cp beispiele/module main                     # läuft auf einer blanken JVM
+./bin/edel binär     beispiele/module/main.edel    # natives Programm beispiele/module/main
 ```
+
+Im Bytecode landen die Top-Level-Funktionen aller Module als statische
+Methoden der Hauptklasse (die nach der Einstiegsdatei benannt ist);
+Punkte aus Paketnamen werden in JVM-Methodennamen zu `$` kodiert, da
+JVM-Methodennamen keine Punkte zulassen. Datensätze, Klassen, Aufzählungen
+und Schnittstellen erhalten je eine eigene `.class`-Datei unter ihrem
+Paketpfad (`geometrie/Punkt.class`).
 
 *A program may span multiple files. A file's optional `paket a.b.c` directive
 determines the FQN of its top-level declarations and the directory it lives
 in; `importiere a.b.Name` brings a single symbol into scope under its short
 name. Discovery follows the import closure — files unreachable from the
-entry stay out, so existing single-file programs are unaffected. Phase 1
-of module support targets the interpreter; the bytecode backend rejects
-multi-file programs for now (`edel übersetze` and `edel binär` still work
-on any file that uses neither `paket` nor `importiere`).*
+entry stay out, so existing single-file programs are unaffected. Modules
+work end-to-end: interpreter, bytecode, and native binary. In the JVM
+backend, top-level functions become static methods on the main class
+(dotted FQNs encoded as `$` in JVM method names); each user type lands
+in its own `.class` file under its package directory.*
 
 ### Schlüsselwörter / Keywords
 
