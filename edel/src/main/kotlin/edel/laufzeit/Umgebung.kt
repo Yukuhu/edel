@@ -11,9 +11,12 @@ class Umgebung(val eltern: Umgebung? = null) {
     }
 
     fun hole(name: String): Wert =
-        werte[name]
-            ?: eltern?.hole(name)
+        holeOderNull(name)
             ?: throw LaufzeitFehler("Unbekannter Name: '$name'")
+
+    /** Liefert den Wert oder `null`, ohne einen Laufzeitfehler zu werfen. */
+    fun holeOderNull(name: String): Wert? =
+        werte[name] ?: eltern?.holeOderNull(name)
 
     fun setze(name: String, wert: Wert) {
         when {

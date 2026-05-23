@@ -11,6 +11,7 @@ editors/vscode/server/
 
 # In beispiele/ nur Quell- und Erwartungsdateien versionieren
 # (erzeugte .class-Dateien und native Programme bleiben aussen vor).
-beispiele/*
-!beispiele/*.edel
-!beispiele/*.aus
+beispiele/**
+!beispiele/**/
+!beispiele/**/*.edel
+!beispiele/**/*.aus

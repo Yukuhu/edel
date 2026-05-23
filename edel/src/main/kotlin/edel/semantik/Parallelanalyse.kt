@@ -138,10 +138,7 @@ class Parallelanalyse(
     private fun gefangeneVon(ausdruck: Ausdruck): List<GefangeneVariable> {
         val ergebnis = LinkedHashMap<String, Typ>()
         for (teil in alleTeilausdrücke(ausdruck)) {
-            if (teil is Bezeichner &&
-                teil.name !in symbole.funktionen &&
-                teil.name !in Resolver.EINGEBAUTE_NAMEN
-            ) {
+            if (teil is Bezeichner && !istGlobalerName(teil)) {
                 bezeichnerTypen[teil]?.let { ergebnis.putIfAbsent(teil.name, it) }
             }
         }
@@ -152,8 +149,13 @@ class Parallelanalyse(
     private fun freieNamen(ausdruck: Ausdruck): Set<String> =
         alleTeilausdrücke(ausdruck)
             .filterIsInstance<Bezeichner>()
-            .map { it.name }
-            .filterTo(HashSet()) { it !in symbole.funktionen && it !in Resolver.EINGEBAUTE_NAMEN }
+            .filterNot { istGlobalerName(it) }
+            .mapTo(HashSet()) { it.name }
+
+    private fun istGlobalerName(b: Bezeichner): Boolean {
+        val fqn = b.aufgelöst ?: b.name
+        return fqn in symbole.funktionen || b.name in Resolver.EINGEBAUTE_NAMEN
+    }
 
     // ---- Unabhaengige 'sei'-Gruppen -----------------------------------------
 
@@ -355,7 +357,7 @@ class Parallelanalyse(
         for (bezeichner in alleBezeichner(körper)) {
             val name = bezeichner.name
             if (name in lokale || name in operatoren) continue
-            if (name in symbole.funktionen || name in Resolver.EINGEBAUTE_NAMEN) continue
+            if (istGlobalerName(bezeichner)) continue
             bezeichnerTypen[bezeichner]?.let { gefangene.putIfAbsent(name, it) }
         }
 

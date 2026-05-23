@@ -1,0 +1,3 @@
+a = geometrie.Punkt(2, 3)
+b = geometrie.Punkt(6, 2)
+|a - b|_1 = 5

@@ -39,7 +39,16 @@ class Bytecodeerzeuger(
     private val symbole: GlobaleSymbole,
     private val klassenname: String,
     private val parallelplan: Parallelplan = Parallelplan(emptyMap()),
+    /** FQN der Einstiegsfunktion -- Standard `start` (unbenanntes Paket). */
+    private val eintragsStart: String = "start",
 ) {
+    /**
+     * JVM-Methodenname zu einem vollqualifizierten Edel-Namen. JVM-Methodennamen
+     * duerfen keine Punkte enthalten, daher kodieren wir Paketgrenzen als `$`
+     * -- vereinbarter Edel-Bezeichnerzeichensatz erlaubt kein `$`, deshalb
+     * sind Kollisionen mit von Benutzern geschriebenen Namen ausgeschlossen.
+     */
+    private fun jvm(fqn: String): String = fqn.replace('.', '$')
     // Nicht-nullbare Grundarten, ihre nullbaren (geboxten) Gegenstuecke sowie
     // OBJEKT fuer Referenzen auf Datensatz-Klassen.
     private enum class Art {
@@ -151,18 +160,18 @@ class Bytecodeerzeuger(
 
         klassen[klassenname] = ClassFile.of().build(selbst) { clb ->
             clb.withFlags(ClassFile.ACC_PUBLIC or ClassFile.ACC_FINAL)
-            // Einsprungpunkt: main ruft die Edel-Funktion start auf.
+            // Einsprungpunkt: main ruft die Edel-Funktion `start` auf.
             clb.withMethodBody(
                 "main",
                 MethodTypeDesc.of(ConstantDescs.CD_void, ClassDesc.ofDescriptor("[Ljava/lang/String;")),
                 ClassFile.ACC_PUBLIC or ClassFile.ACC_STATIC,
             ) { code ->
-                code.invokestatic(selbst, "start", MethodTypeDesc.of(ConstantDescs.CD_void))
+                code.invokestatic(selbst, jvm(eintragsStart), MethodTypeDesc.of(ConstantDescs.CD_void))
                 code.return_()
             }
             for (funktion in funktionen) {
                 clb.withMethodBody(
-                    funktion.name,
+                    jvm(funktion.name),
                     deskriptor(funktion.name),
                     ClassFile.ACC_PUBLIC or ClassFile.ACC_STATIC,
                 ) { code ->
@@ -1508,17 +1517,18 @@ class Bytecodeerzeuger(
 
     /** Erzeugt `neu Typ(...)`: `new` + Konstruktoraufruf fuer Datensaetze und Klassen. */
     private fun erzeugeNeu(ausdruck: NeuAusdruck) {
-        val ktorTypen = when (symbole.typen[ausdruck.typname]) {
-            is DatensatzTyp -> symbole.datensatzDeklarationen.getValue(ausdruck.typname)
+        val fqn = ausdruck.aufgelöst ?: ausdruck.typname
+        val ktorTypen = when (symbole.typen[fqn]) {
+            is DatensatzTyp -> symbole.datensatzDeklarationen.getValue(fqn)
                 .felder.map { auflöse(it.typ) }
-            is KlassenTyp -> ktorFelderKette(symbole.klassenDeklarationen.getValue(ausdruck.typname))
+            is KlassenTyp -> ktorFelderKette(symbole.klassenDeklarationen.getValue(fqn))
                 .map { auflöse(it.typ) }
             else -> ablehnen(
                 "'neu ${ausdruck.typname}': unbekannter oder nicht unterstuetzter Typ",
                 ausdruck.position,
             )
         }
-        val ziel = ClassDesc.of(ausdruck.typname)
+        val ziel = ClassDesc.of(fqn)
         cob.new_(ziel)
         cob.dup()
         ausdruck.argumente.forEachIndexed { i, argument -> erzeugeMitTyp(argument, ktorTypen[i]) }
@@ -1929,12 +1939,13 @@ class Bytecodeerzeuger(
                 ausdruck.position,
             )
             else -> {
-                val signatur = symbole.funktionen[ziel.name]
+                val fqn = ziel.aufgelöst ?: ziel.name
+                val signatur = symbole.funktionen[fqn]
                     ?: ablehnen("Unbekannte Funktion: '${ziel.name}'", ausdruck.position)
                 ausdruck.argumente.forEachIndexed { i, argument ->
                     erzeugeMitTyp(argument, signatur.parameter[i])
                 }
-                cob.invokestatic(selbst, ziel.name, deskriptor(ziel.name))
+                cob.invokestatic(selbst, jvm(fqn), deskriptor(fqn))
             }
         }
     }
@@ -2576,7 +2587,7 @@ class Bytecodeerzeuger(
                         }
                         ziel.name == "Erfolg" -> ErgebnisTyp(typVon(ausdruck.argumente[0]))
                         ziel.name == "Fehler" -> ErgebnisTyp(NichtsTyp)
-                        else -> symbole.funktionen[ziel.name]?.rückgabe
+                        else -> symbole.funktionen[ziel.aufgelöst ?: ziel.name]?.rückgabe
                             ?: ablehnen("Unbekannte Funktion: '${ziel.name}'", ausdruck.position)
                     }
                 }
@@ -2597,7 +2608,7 @@ class Bytecodeerzeuger(
         }
         is ElvisAusdruck -> gemeinsamerTyp(entnullt(typVon(ausdruck.links)), typVon(ausdruck.rechts))
         is NichtNullAusdruck -> entnullt(typVon(ausdruck.operand))
-        is NeuAusdruck -> symbole.typen[ausdruck.typname]
+        is NeuAusdruck -> symbole.typen[ausdruck.aufgelöst ?: ausdruck.typname]
             ?: ablehnen("Unbekannter Typ: '${ausdruck.typname}'", ausdruck.position)
         is FeldzugriffAusdruck -> aufzählungsVariante(ausdruck)
             ?: feldTypVon(entnullt(typVon(ausdruck.ziel)), ausdruck.feld, ausdruck.position)

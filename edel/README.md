@@ -197,6 +197,68 @@ assignable to any `Ergebnis<T>`); `istErfolg`/`istFehler`/`wert`/`meldung`/
 user-defined generics required — and works identically across interpreter,
 bytecode and native binary.*
 
+### Module / Modules
+
+Ein Edel-Programm kann sich auf mehrere Dateien verteilen. Jede Datei darf
+ein Paket deklarieren und Namen aus anderen Paketen einziehen:
+
+```
+// geometrie/punkt.edel
+paket geometrie
+datensatz Punkt(x: Ganzzahl, y: Ganzzahl)
+funktion verschiebe(p: Punkt, dx: Ganzzahl, dy: Ganzzahl): Punkt {
+    zurück neu Punkt(p.x + dx, p.y + dy)
+}
+```
+
+```
+// main.edel
+importiere geometrie.Punkt
+importiere geometrie.verschiebe
+
+funktion start() {
+    sei p = verschiebe(neu Punkt(1, 2), 10, 0)
+    drucke(p.x)
+}
+```
+
+Regeln:
+
+- `paket a.b.c` muss am Anfang der Datei stehen; der Dateipfad endet auf
+  `a/b/c/<datei>.edel` relativ zur Quellwurzel (dem Verzeichnis der
+  Einstiegsdatei, ggf. um die Pakettiefe der Einstiegsdatei hochgeklettert).
+- `importiere a.b.Name` zieht **einen** Top-Level-Namen (Funktion, Datensatz,
+  Klasse, Aufzählung, Schnittstelle) unter seinem Kurznamen in Sicht.
+- Auflösung erfolgt über die **Importhülle**: nur Dateien, die per `importiere`
+  (transitiv) erreichbar sind, sind Teil des Projekts. Andere `.edel`-Dateien
+  im Baum bleiben unberührt — eine Einzeldatei in `beispiele/` läuft weiterhin
+  ohne Vorbereitung wie bisher.
+
+```bash
+./bin/edel starte    beispiele/module/main.edel    # alle Module werden geladen
+./bin/edel prüfe     beispiele/module/main.edel    # Typprüfung über alle Module
+./bin/edel übersetze beispiele/module/main.edel    # main.class + geometrie/Punkt.class
+java -cp beispiele/module main                     # läuft auf einer blanken JVM
+./bin/edel binär     beispiele/module/main.edel    # natives Programm beispiele/module/main
+```
+
+Im Bytecode landen die Top-Level-Funktionen aller Module als statische
+Methoden der Hauptklasse (die nach der Einstiegsdatei benannt ist);
+Punkte aus Paketnamen werden in JVM-Methodennamen zu `$` kodiert, da
+JVM-Methodennamen keine Punkte zulassen. Datensätze, Klassen, Aufzählungen
+und Schnittstellen erhalten je eine eigene `.class`-Datei unter ihrem
+Paketpfad (`geometrie/Punkt.class`).
+
+*A program may span multiple files. A file's optional `paket a.b.c` directive
+determines the FQN of its top-level declarations and the directory it lives
+in; `importiere a.b.Name` brings a single symbol into scope under its short
+name. Discovery follows the import closure — files unreachable from the
+entry stay out, so existing single-file programs are unaffected. Modules
+work end-to-end: interpreter, bytecode, and native binary. In the JVM
+backend, top-level functions become static methods on the main class
+(dotted FQNs encoded as `$` in JVM method names); each user type lands
+in its own `.class` file under its package directory.*
+
 ### Schlüsselwörter / Keywords
 
 `sei ver funktion zurück wenn sonst solange für in von bis brich weiter
