@@ -16,11 +16,46 @@ class Parser(private val tokens: List<Token>) {
     private var i = 0
 
     fun parse(): Programm {
+        var paket: String? = null
+        val importe = LinkedHashMap<String, String>()
         val deklarationen = mutableListOf<Deklaration>()
         while (!amEnde()) {
-            deklarationen.add(deklaration())
+            when (aktuell().typ) {
+                PAKET -> {
+                    val pos = tokens[i++].position
+                    val name = punktName("Paketname")
+                    if (paket != null) {
+                        fehler("Nur eine 'paket'-Direktive je Datei erlaubt", pos)
+                    }
+                    paket = name
+                }
+                IMPORTIERE -> {
+                    val pos = tokens[i++].position
+                    val name = punktName("Importname")
+                    val kurz = name.substringAfterLast('.')
+                    if (!name.contains('.')) {
+                        fehler("'importiere' erwartet einen punktierten Namen wie 'a.b.Name'", pos)
+                    }
+                    if (kurz in importe) {
+                        fehler("Mehrdeutiger Import: '$kurz' wurde bereits importiert", pos)
+                    }
+                    importe[kurz] = name
+                }
+                else -> deklarationen.add(deklaration())
+            }
         }
-        return Programm(deklarationen)
+        return Programm(deklarationen, paket, importe)
+    }
+
+    /** Punktierter Name `a.b.c` -- benutzt von `paket` und `importiere`. */
+    private fun punktName(was: String): String {
+        val erstes = erwarte(BEZEICHNER, was).text
+        val sb = StringBuilder(erstes)
+        while (passt(PUNKT)) {
+            sb.append('.')
+            sb.append(erwarte(BEZEICHNER, was).text)
+        }
+        return sb.toString()
     }
 
     // ---- Tokenstrom-Hilfen --------------------------------------------------
@@ -66,14 +101,11 @@ class Parser(private val tokens: List<Token>) {
             KLASSE -> klasseDeklaration()
             AUFZÄHLUNG -> aufzählungDeklaration()
             SCHNITTSTELLE -> schnittstelleDeklaration()
-            IMPORTIERE -> {
-                val pos = tokens[i++].position
-                ImportDeklaration(erwarte(BEZEICHNER, "Modulname").text, pos)
-            }
-            PAKET -> {
-                val pos = tokens[i++].position
-                PaketDeklaration(erwarte(BEZEICHNER, "Paketname").text, pos)
-            }
+            PAKET, IMPORTIERE -> fehler(
+                "'${aktuell().text}'-Direktiven muessen am Anfang der Datei stehen, " +
+                    "vor allen Deklarationen",
+                aktuell().position,
+            )
             else -> fehler(
                 "Erwartet wurde eine Deklaration (funktion, datensatz, klasse, " +
                     "aufzählung, schnittstelle), gefunden: '${aktuell().text}'",

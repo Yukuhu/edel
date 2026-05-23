@@ -1,8 +1,9 @@
 package edel.fehler
 
-/** Eine 1-basierte Position im Quelltext. */
-data class Position(val zeile: Int, val spalte: Int) {
-    override fun toString(): String = "$zeile:$spalte"
+/** Eine 1-basierte Position im Quelltext, optional mit Dateipfad. */
+data class Position(val zeile: Int, val spalte: Int, val datei: String? = null) {
+    override fun toString(): String =
+        if (datei == null) "$zeile:$spalte" else "$datei:$zeile:$spalte"
 }
 
 /** Eine einzelne Fehlermeldung mit Quellort. */

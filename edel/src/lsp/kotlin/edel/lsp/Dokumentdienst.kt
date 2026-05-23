@@ -246,9 +246,8 @@ class EdelDokumentdienst : TextDocumentService {
                         symbol(text, methode.name, methode.position, SymbolKind.Method, "funktion")
                     },
                 )
-                else -> null
             }
-            if (symbol != null) symbole.add(Either.forRight(symbol))
+            symbole.add(Either.forRight(symbol))
         }
         return CompletableFuture.completedFuture(symbole)
     }
@@ -289,7 +288,6 @@ class EdelDokumentdienst : TextDocumentService {
                         eintraege.add(eintrag(d.name, CompletionItemKind.Enum))
                         d.varianten.forEach { eintraege.add(eintrag(it, CompletionItemKind.EnumMember)) }
                     }
-                    else -> {}
                 }
             }
             umschließendeFunktion(programm, zuEdel(params.position))?.let { funktion ->
@@ -316,7 +314,6 @@ class EdelDokumentdienst : TextDocumentService {
         ziel: edel.fehler.Position,
     ): Pair<edel.fehler.Position, String>? {
         for (d in programm.deklarationen) {
-            if (d is edel.parser.ImportDeklaration || d is edel.parser.PaketDeklaration) continue
             val pos = namensPosition(text, d.position, d.name)
             if (spanneEnthält(pos, d.name, ziel)) {
                 return pos to beschreibung(d)
@@ -331,7 +328,6 @@ class EdelDokumentdienst : TextDocumentService {
         is KlasseDeklaration -> "klasse ${d.name}"
         is AufzählungDeklaration -> "aufzählung ${d.name}"
         is SchnittstelleDeklaration -> "schnittstelle ${d.name}"
-        else -> d.name
     }
 
     private fun signatur(f: FunktionDeklaration): String {

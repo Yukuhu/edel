@@ -1,0 +1,18 @@
+// Modul `geometrie`: ein Datensatz und reine Funktionen darueber.
+
+paket geometrie
+
+datensatz Punkt(x: Ganzzahl, y: Ganzzahl)
+
+funktion verschiebe(p: Punkt, dx: Ganzzahl, dy: Ganzzahl): Punkt {
+    zurück neu Punkt(p.x + dx, p.y + dy)
+}
+
+funktion betrag(n: Ganzzahl): Ganzzahl {
+    wenn n < 0 { zurück 0 - n }
+    zurück n
+}
+
+funktion manhattan(p: Punkt, q: Punkt): Ganzzahl {
+    zurück betrag(p.x - q.x) + betrag(p.y - q.y)
+}

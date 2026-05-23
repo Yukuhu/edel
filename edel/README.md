@@ -197,6 +197,57 @@ assignable to any `Ergebnis<T>`); `istErfolg`/`istFehler`/`wert`/`meldung`/
 user-defined generics required — and works identically across interpreter,
 bytecode and native binary.*
 
+### Module / Modules
+
+Ein Edel-Programm kann sich auf mehrere Dateien verteilen. Jede Datei darf
+ein Paket deklarieren und Namen aus anderen Paketen einziehen:
+
+```
+// geometrie/punkt.edel
+paket geometrie
+datensatz Punkt(x: Ganzzahl, y: Ganzzahl)
+funktion verschiebe(p: Punkt, dx: Ganzzahl, dy: Ganzzahl): Punkt {
+    zurück neu Punkt(p.x + dx, p.y + dy)
+}
+```
+
+```
+// main.edel
+importiere geometrie.Punkt
+importiere geometrie.verschiebe
+
+funktion start() {
+    sei p = verschiebe(neu Punkt(1, 2), 10, 0)
+    drucke(p.x)
+}
+```
+
+Regeln:
+
+- `paket a.b.c` muss am Anfang der Datei stehen; der Dateipfad endet auf
+  `a/b/c/<datei>.edel` relativ zur Quellwurzel (dem Verzeichnis der
+  Einstiegsdatei, ggf. um die Pakettiefe der Einstiegsdatei hochgeklettert).
+- `importiere a.b.Name` zieht **einen** Top-Level-Namen (Funktion, Datensatz,
+  Klasse, Aufzählung, Schnittstelle) unter seinem Kurznamen in Sicht.
+- Auflösung erfolgt über die **Importhülle**: nur Dateien, die per `importiere`
+  (transitiv) erreichbar sind, sind Teil des Projekts. Andere `.edel`-Dateien
+  im Baum bleiben unberührt — eine Einzeldatei in `beispiele/` läuft weiterhin
+  ohne Vorbereitung wie bisher.
+
+```bash
+./bin/edel starte beispiele/module/main.edel    # alle Module werden geladen
+./bin/edel prüfe  beispiele/module/main.edel    # Typprüfung über alle Module
+```
+
+*A program may span multiple files. A file's optional `paket a.b.c` directive
+determines the FQN of its top-level declarations and the directory it lives
+in; `importiere a.b.Name` brings a single symbol into scope under its short
+name. Discovery follows the import closure — files unreachable from the
+entry stay out, so existing single-file programs are unaffected. Phase 1
+of module support targets the interpreter; the bytecode backend rejects
+multi-file programs for now (`edel übersetze` and `edel binär` still work
+on any file that uses neither `paket` nor `importiere`).*
+
 ### Schlüsselwörter / Keywords
 
 `sei ver funktion zurück wenn sonst solange für in von bis brich weiter

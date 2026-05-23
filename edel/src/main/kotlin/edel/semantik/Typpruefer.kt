@@ -428,9 +428,10 @@ class Typpruefer(
 
             is Bezeichner -> {
                 val info = bereich.finde(ausdruck.name)
+                val fqn = ausdruck.aufgelöst ?: ausdruck.name
                 val typ = when {
                     info != null -> info.typ
-                    ausdruck.name in symbole.funktionen -> symbole.funktionen[ausdruck.name]!!
+                    fqn in symbole.funktionen -> symbole.funktionen[fqn]!!
                     ausdruck.name in Resolver.EINGEBAUTE_NAMEN -> {
                         diagnosen.melde(
                             "'${ausdruck.name}' ist eingebaut und muss aufgerufen werden",
@@ -879,7 +880,7 @@ class Typpruefer(
     }
 
     private fun prüfeNeu(ausdruck: NeuAusdruck, bereich: Geltungsbereich): Typ {
-        val typ = symbole.typen[ausdruck.typname]
+        val typ = symbole.typen[ausdruck.aufgelöst ?: ausdruck.typname]
         return when (typ) {
             is DatensatzTyp -> {
                 prüfeArgumente(

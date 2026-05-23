@@ -10,6 +10,15 @@ import edel.semantik.Reduktion
 import java.util.concurrent.Callable
 import java.util.concurrent.ForkJoinTask
 
+/** Lokal-zuerst-, dann-FQN-Lookup: laesst Lokale globale Namen verschatten. */
+private fun nachschlagen(umgebung: Umgebung, kurz: String, fqn: String?): Wert {
+    umgebung.holeOderNull(kurz)?.let { return it }
+    if (fqn != null && fqn != kurz) {
+        umgebung.holeOderNull(fqn)?.let { return it }
+    }
+    throw LaufzeitFehler("Unbekannter Name: '$kurz'")
+}
+
 // Kontrollfluss-Signale; Stacktraces sind unnoetig und werden unterdrueckt.
 private class ZurückSignal(val wert: Wert) : RuntimeException() {
     override fun fillInStackTrace() = this
@@ -29,6 +38,8 @@ class Interpreter(
     private val programm: Programm,
     private val parallelplan: Parallelplan = Parallelplan(emptyMap()),
     private val ausgabe: (String) -> Unit = ::println,
+    /** FQN der Einstiegsfunktion (Standard: `start` im unbenannten Paket). */
+    private val eintrag: String = "start",
 ) {
     private val global = Umgebung()
     private val klassen = HashMap<String, KlasseDeklaration>()
@@ -40,8 +51,8 @@ class Interpreter(
 
     fun starte() {
         registriereDeklarationen()
-        val start = global.hole("start")
-        if (start !is FunktionWert) throw LaufzeitFehler("'start' ist keine Funktion")
+        val start = global.hole(eintrag)
+        if (start !is FunktionWert) throw LaufzeitFehler("'$eintrag' ist keine Funktion")
         rufeAuf(start, emptyList())
     }
 
@@ -381,7 +392,7 @@ class Interpreter(
         is WahrheitLiteral -> WahrheitWert(ausdruck.wert)
         is NichtsLiteral -> NichtsWert
 
-        is Bezeichner -> umgebung.hole(ausdruck.name)
+        is Bezeichner -> nachschlagen(umgebung, ausdruck.name, ausdruck.aufgelöst)
         is DiesAusdruck -> umgebung.hole("dies")
 
         is UnärAusdruck -> {
@@ -474,7 +485,7 @@ class Interpreter(
 
         is NeuAusdruck -> {
             val argumente = ausdruck.argumente.map { evaluiere(it, umgebung) }
-            konstruiere(ausdruck.typname, argumente)
+            konstruiere(ausdruck.aufgelöst ?: ausdruck.typname, argumente)
         }
 
         is LambdaAusdruck -> {

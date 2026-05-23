@@ -1,0 +1,14 @@
+// Einstiegsdatei: importiert das Modul `geometrie` und nutzt seine Typen
+// und Funktionen.
+
+importiere geometrie.Punkt
+importiere geometrie.verschiebe
+importiere geometrie.manhattan
+
+funktion start() {
+    sei a = neu Punkt(2, 3)
+    sei b = verschiebe(a, 4, -1)
+    drucke("a = " + a)
+    drucke("b = " + b)
+    drucke("|a - b|_1 = " + manhattan(a, b))
+}

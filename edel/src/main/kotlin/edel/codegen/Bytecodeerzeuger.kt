@@ -1508,17 +1508,18 @@ class Bytecodeerzeuger(
 
     /** Erzeugt `neu Typ(...)`: `new` + Konstruktoraufruf fuer Datensaetze und Klassen. */
     private fun erzeugeNeu(ausdruck: NeuAusdruck) {
-        val ktorTypen = when (symbole.typen[ausdruck.typname]) {
-            is DatensatzTyp -> symbole.datensatzDeklarationen.getValue(ausdruck.typname)
+        val fqn = ausdruck.aufgelöst ?: ausdruck.typname
+        val ktorTypen = when (symbole.typen[fqn]) {
+            is DatensatzTyp -> symbole.datensatzDeklarationen.getValue(fqn)
                 .felder.map { auflöse(it.typ) }
-            is KlassenTyp -> ktorFelderKette(symbole.klassenDeklarationen.getValue(ausdruck.typname))
+            is KlassenTyp -> ktorFelderKette(symbole.klassenDeklarationen.getValue(fqn))
                 .map { auflöse(it.typ) }
             else -> ablehnen(
                 "'neu ${ausdruck.typname}': unbekannter oder nicht unterstuetzter Typ",
                 ausdruck.position,
             )
         }
-        val ziel = ClassDesc.of(ausdruck.typname)
+        val ziel = ClassDesc.of(fqn)
         cob.new_(ziel)
         cob.dup()
         ausdruck.argumente.forEachIndexed { i, argument -> erzeugeMitTyp(argument, ktorTypen[i]) }
@@ -1929,12 +1930,13 @@ class Bytecodeerzeuger(
                 ausdruck.position,
             )
             else -> {
-                val signatur = symbole.funktionen[ziel.name]
+                val fqn = ziel.aufgelöst ?: ziel.name
+                val signatur = symbole.funktionen[fqn]
                     ?: ablehnen("Unbekannte Funktion: '${ziel.name}'", ausdruck.position)
                 ausdruck.argumente.forEachIndexed { i, argument ->
                     erzeugeMitTyp(argument, signatur.parameter[i])
                 }
-                cob.invokestatic(selbst, ziel.name, deskriptor(ziel.name))
+                cob.invokestatic(selbst, fqn, deskriptor(fqn))
             }
         }
     }
@@ -2576,7 +2578,7 @@ class Bytecodeerzeuger(
                         }
                         ziel.name == "Erfolg" -> ErgebnisTyp(typVon(ausdruck.argumente[0]))
                         ziel.name == "Fehler" -> ErgebnisTyp(NichtsTyp)
-                        else -> symbole.funktionen[ziel.name]?.rückgabe
+                        else -> symbole.funktionen[ziel.aufgelöst ?: ziel.name]?.rückgabe
                             ?: ablehnen("Unbekannte Funktion: '${ziel.name}'", ausdruck.position)
                     }
                 }
@@ -2597,7 +2599,7 @@ class Bytecodeerzeuger(
         }
         is ElvisAusdruck -> gemeinsamerTyp(entnullt(typVon(ausdruck.links)), typVon(ausdruck.rechts))
         is NichtNullAusdruck -> entnullt(typVon(ausdruck.operand))
-        is NeuAusdruck -> symbole.typen[ausdruck.typname]
+        is NeuAusdruck -> symbole.typen[ausdruck.aufgelöst ?: ausdruck.typname]
             ?: ablehnen("Unbekannter Typ: '${ausdruck.typname}'", ausdruck.position)
         is FeldzugriffAusdruck -> aufzählungsVariante(ausdruck)
             ?: feldTypVon(entnullt(typVon(ausdruck.ziel)), ausdruck.feld, ausdruck.position)

@@ -16,7 +16,11 @@ class EinfacherTypausdruck(
     val name: String,
     val typargumente: List<Typausdruck>,
     override val position: Position,
-) : Typausdruck()
+) : Typausdruck() {
+    /** Vom Resolver gesetzter vollqualifizierter Name (z. B. `geometrie.Punkt`),
+     *  falls [name] auf einen benutzerdefinierten Typ verweist; sonst `null`. */
+    var aufgelöst: String? = null
+}
 
 /** Ein Funktionstyp: `(Ganzzahl, Text) -> Wahrheit`. */
 class FunktionsTypausdruck(
@@ -53,7 +57,12 @@ class WahrheitLiteral(val wert: Boolean, override val position: Position) : Ausd
 class NichtsLiteral(override val position: Position) : Ausdruck()
 
 /** Ein Namensbezug: Variable oder Funktion. */
-class Bezeichner(val name: String, override val position: Position) : Ausdruck()
+class Bezeichner(val name: String, override val position: Position) : Ausdruck() {
+    /** Vom Resolver gesetzter vollqualifizierter Name (z. B. `geometrie.entfernung`),
+     *  falls [name] auf eine globale Deklaration verweist; bei lokalen
+     *  Bindungen oder Eingebauten bleibt das Feld `null`. */
+    var aufgelöst: String? = null
+}
 
 /** Bezug auf das aktuelle Objekt innerhalb einer Methode. */
 class DiesAusdruck(override val position: Position) : Ausdruck()
@@ -106,7 +115,10 @@ class NeuAusdruck(
     val typname: String,
     val argumente: List<Ausdruck>,
     override val position: Position,
-) : Ausdruck()
+) : Ausdruck() {
+    /** Vom Resolver gesetzter vollqualifizierter Typname; siehe [Bezeichner.aufgelöst]. */
+    var aufgelöst: String? = null
+}
 
 class LambdaAusdruck(
     val parameter: List<Parameter>,
@@ -192,7 +204,7 @@ sealed class Deklaration {
 }
 
 class FunktionDeklaration(
-    override val name: String,
+    override var name: String,
     val parameter: List<Parameter>,
     val rückgabetyp: Typausdruck?,
     val körper: Block,
@@ -202,7 +214,7 @@ class FunktionDeklaration(
 ) : Deklaration()
 
 class DatensatzDeklaration(
-    override val name: String,
+    override var name: String,
     val felder: List<Parameter>,
     override val position: Position,
 ) : Deklaration()
@@ -217,16 +229,16 @@ class FeldDeklaration(
 )
 
 class KlasseDeklaration(
-    override val name: String,
-    val oberklasse: String?,
-    val schnittstellen: List<String>,
+    override var name: String,
+    var oberklasse: String?,
+    var schnittstellen: List<String>,
     val felder: List<FeldDeklaration>,
     val methoden: List<FunktionDeklaration>,
     override val position: Position,
 ) : Deklaration()
 
 class AufzählungDeklaration(
-    override val name: String,
+    override var name: String,
     val varianten: List<String>,
     override val position: Position,
 ) : Deklaration()
@@ -239,13 +251,25 @@ class MethodenSignatur(
 )
 
 class SchnittstelleDeklaration(
-    override val name: String,
+    override var name: String,
     val methoden: List<MethodenSignatur>,
     override val position: Position,
 ) : Deklaration()
 
-class ImportDeklaration(override val name: String, override val position: Position) : Deklaration()
-class PaketDeklaration(override val name: String, override val position: Position) : Deklaration()
-
-/** Das gesamte uebersetzte Programm. */
-class Programm(val deklarationen: List<Deklaration>)
+/**
+ * Das gesamte uebersetzte Programm einer einzelnen Quelldatei.
+ *
+ * `paket` und `importe` werden vom Parser aus den `paket`/`importiere`-
+ * Direktiven gesammelt und nicht in [deklarationen] gefuehrt — sie sind
+ * Modulmetadaten, keine ausfuehrbaren Deklarationen.
+ *
+ *  - [paket]   ist der vollqualifizierte Paketname dieser Datei (`a.b.c`)
+ *              oder `null`, wenn keine `paket`-Direktive vorliegt.
+ *  - [importe] bildet die vom Quelltext sichtbaren Kurznamen auf ihren
+ *              vollqualifizierten Namen ab (z. B. `"Punkt" -> "geometrie.Punkt"`).
+ */
+class Programm(
+    val deklarationen: List<Deklaration>,
+    val paket: String? = null,
+    val importe: Map<String, String> = emptyMap(),
+)
