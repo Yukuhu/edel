@@ -218,8 +218,15 @@ internal fun umschließendeFunktion(programm: Programm, p: EdelPosition): Funkti
         .filter { it.position.zeile <= p.zeile }
         .maxByOrNull { it.position.zeile }
 
-/** Eine Typverwendung im Quelltext (Name eines Typs an einer Annotationsstelle). */
-internal class TypVerwendung(val name: String, val position: EdelPosition)
+/**
+ * Eine Typverwendung im Quelltext: Kurzname [name] und (falls vom Resolver
+ * aufgeloest) der FQN [aufgelöst], unter dem die Deklaration registriert ist.
+ */
+internal class TypVerwendung(
+    val name: String,
+    val position: EdelPosition,
+    val aufgelöst: String? = null,
+)
 
 /** Alle Typverwendungen: Annotationen, Rueckgabetypen, Felder und `neu`-Ausdruecke. */
 internal fun alleTypVerwendungen(programm: Programm, text: String): List<TypVerwendung> {
@@ -227,14 +234,14 @@ internal fun alleTypVerwendungen(programm: Programm, text: String): List<TypVerw
     fun ausTyp(t: Typausdruck?) {
         if (t == null) return
         jedeTypausdruck(t) { tt ->
-            if (tt is EinfacherTypausdruck) raus.add(TypVerwendung(tt.name, tt.position))
+            if (tt is EinfacherTypausdruck) raus.add(TypVerwendung(tt.name, tt.position, tt.aufgelöst))
         }
     }
     fun ausBlock(b: Block) {
         jedeAnweisung(b, { s -> if (s is SeiAnweisung) ausTyp(s.typannotation) }) { a ->
             if (a is LambdaAusdruck) a.parameter.forEach { ausTyp(it.typ) }
             if (a is NeuAusdruck) {
-                raus.add(TypVerwendung(a.typname, namensPosition(text, a.position, a.typname)))
+                raus.add(TypVerwendung(a.typname, namensPosition(text, a.position, a.typname), a.aufgelöst))
             }
         }
     }

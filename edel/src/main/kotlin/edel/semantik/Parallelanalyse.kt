@@ -125,7 +125,8 @@ class Parallelanalyse(
                 when (val ziel = teil.ziel) {
                     is Bezeichner -> {
                         if (ziel.name == "drucke" || ziel.name == "lies") return false
-                        if (ziel.name !in reineFunktionen && ziel.name !in REINE_EINGEBAUTE) return false
+                        val fqn = ziel.aufgelöst ?: ziel.name
+                        if (fqn !in reineFunktionen && ziel.name !in REINE_EINGEBAUTE) return false
                     }
                     is FeldzugriffAusdruck -> if (ziel.feld !in REINE_METHODEN) return false
                     else -> return false
@@ -394,10 +395,12 @@ class Parallelanalyse(
     private fun aufrufVerletzt(aufruf: AufrufAusdruck): Boolean {
         val ziel = aufruf.ziel
         if (ziel is Bezeichner) {
+            // Eingebaute Namen werden ueber den Kurznamen erkannt; benutzerdefinierte
+            // Funktionen sind in `reineFunktionen` per FQN registriert (Resolver-Vorpass).
             return when (ziel.name) {
                 "drucke", "lies" -> true
                 "länge", "Liste", "Abbildung", "Paar" -> false // reine Erzeugung/Abfrage
-                else -> ziel.name !in reineFunktionen
+                else -> (ziel.aufgelöst ?: ziel.name) !in reineFunktionen
             }
         }
         if (ziel is FeldzugriffAusdruck) {
@@ -438,7 +441,8 @@ class Parallelanalyse(
                     val ziel = teil.ziel
                     if (ziel is Bezeichner) {
                         if (ziel.name == "drucke" || ziel.name == "lies") return true
-                        if (ziel.name in unrein) return true
+                        // `unrein` ist nach Resolver-Vorpass per FQN indiziert.
+                        if ((ziel.aufgelöst ?: ziel.name) in unrein) return true
                     } else if (ziel is FeldzugriffAusdruck) {
                         if (ziel.feld !in REINE_METHODEN) return true
                     }

@@ -175,10 +175,15 @@ class EdelDokumentdienst : TextDocumentService {
                     return treffer(uri, namensBereich(text, pos))
                 }
             }
+            // Nach dem Resolver-Vorpass tragen Deklarationen ihren FQN; die
+            // Quelltextverwendung referenziert weiterhin den Kurznamen, der
+            // ueber `aufgelöst` mit dem FQN verknuepft ist.
+            val gesucht = bezeichner.aufgelöst ?: bezeichner.name
             val global = programm.deklarationen.filterIsInstance<FunktionDeklaration>()
-                .firstOrNull { it.name == bezeichner.name }
+                .firstOrNull { it.name == gesucht }
             if (global != null) {
-                val pos = namensPosition(text, global.position, global.name)
+                val anzeigeName = global.name.substringAfterLast('.')
+                val pos = namensPosition(text, global.position, anzeigeName)
                 return treffer(uri, namensBereich(text, pos))
             }
         }
@@ -186,10 +191,12 @@ class EdelDokumentdienst : TextDocumentService {
         val typverwendung = alleTypVerwendungen(programm, text)
             .firstOrNull { spanneEnthält(it.position, it.name, ziel) }
         if (typverwendung != null) {
+            val gesucht = typverwendung.aufgelöst ?: typverwendung.name
             val typdekl = programm.deklarationen
-                .firstOrNull { it.name == typverwendung.name && it !is FunktionDeklaration }
+                .firstOrNull { it.name == gesucht && it !is FunktionDeklaration }
             if (typdekl != null) {
-                val pos = namensPosition(text, typdekl.position, typdekl.name)
+                val anzeigeName = typdekl.name.substringAfterLast('.')
+                val pos = namensPosition(text, typdekl.position, anzeigeName)
                 return treffer(uri, namensBereich(text, pos))
             }
         }
