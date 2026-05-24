@@ -1,0 +1,291 @@
+{
+  "reviewer": "adversarial",
+  "findings": [
+    {
+      "id": "ADV-001",
+      "title": "Purity analysis uses short name to look up FQN function — imported pure function treated as impure, parallelism silently suppressed",
+      "severity": "high",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/semantik/Parallelanalyse.kt",
+      "line": 397,
+      "confidence": 0.90,
+      "autofix_class": "manual",
+      "owner": "human",
+      "requires_verification": false,
+      "pre_existing": false,
+      "evidence": [
+        "Step 1: File `mathe/berechne.edel` declares `paket mathe` and `funktion quadrat(n: Ganzzahl): Ganzzahl { zurück n * n }`. After NamensAuflöser runs, the FunktionDeklaration.name is mutated to `mathe.quadrat`.",
+        "Step 2: File `main.edel` imports `mathe.quadrat`. A Bezeichner node for `quadrat` gets `aufgelöst = \"mathe.quadrat\"`. The global symbol table key is `mathe.quadrat`.",
+        "Step 3: Parallelanalyse.aufrufVerletzt() is called for an AufrufAusdruck whose ziel is that Bezeichner. It executes: `ziel.name !in reineFunktionen`. `ziel.name` is the SHORT name `quadrat`, but `reineFunktionen` contains only `mathe.quadrat` (the FQN from programm.deklarationen). `\"quadrat\" !in reineFunktionen` is TRUE.",
+        "Step 4: aufrufVerletzt returns true, so any loop calling `quadrat` is not parallelised even though the function is demonstrably pure. Downstream: the parallel plan omits the reduction. The interpreter and bytecode produce correct sequential output, but the performance guarantee is silently broken.",
+        "Step 5: The same bug also exists in `funktionIstUnrein` at line 441 — it checks `ziel.name in unrein` using the short name, so an imported function that calls `drucke` will not be propagated as impure (the short name is not in `unrein` which is keyed by FQN). A reduction over such a call could be incorrectly parallelised.",
+        "Concrete reproducer: two-file project where main.edel imports a function `mathe.sum` and has a `für` loop using it as an accumulator helper. `berechneReinheit` sets `mathe.sum` as the key in the returned set, but aufrufVerletzt tests `\"sum\" in reineFunktionen` — false — and returns impure. The loop is NOT parallelised even though it should be."
+      ],
+      "suggested_fix": "In aufrufVerletzt and funktionIstUnrein, look up using `val fqn = ziel.aufgelöst ?: ziel.name` then test `fqn !in reineFunktionen` / `fqn in unrein`. This mirrors how istGlobalerName already handles this."
+    },
+    {
+      "id": "ADV-002",
+      "title": "parsePaketUndImporte reads each file twice — parse error on second read causes exitProcess instead of clean diagnostic; file-read TOCTOU on import graph walk",
+      "severity": "medium",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/Main.kt",
+      "line": 364,
+      "confidence": 0.82,
+      "autofix_class": "advisory",
+      "owner": "human",
+      "requires_verification": false,
+      "pre_existing": false,
+      "evidence": [
+        "Step 1: sammleProjekt calls parsePaketUndImporte(absolut) to read the entry file. The file content is read and parsed.",
+        "Step 2: Then `gesammelt[absolut.path] = absolut.readText(Charsets.UTF_8)` reads the entry file AGAIN for its source text. This is a second disk read.",
+        "Step 3: For every imported file, findeImportdatei calls parsePaketUndImporte(kand.absoluteFile) which reads and parses it. Then sammleProjekt adds it to `gesammelt` with a third read: `datei.readText(Charsets.UTF_8)`. Then parsePaketUndImporte(datei) is called AGAIN to get transitive imports — a fourth read.",
+        "Step 4: On a system where files are modified between the parse-for-discovery pass and the read-for-content pass (e.g., a `git checkout` or editor auto-save during compilation), gesammelt contains content from a different version than what was used to compute the import graph. The compiled program is internally inconsistent.",
+        "Step 5: More concretely: if a file is deleted between the first parsePaketUndImporte and the second readText, the second read throws IOException which propagates uncaught out of sammleProjekt, bypassing the user-friendly error path entirely."
+      ],
+      "suggested_fix": "Read each file exactly once and store both the text and the parsed Programm. Pass the pre-read content into analysiereProjekt instead of re-reading from disk."
+    },
+    {
+      "id": "ADV-003",
+      "title": "Circular imports cause infinite loop in sammleProjekt — no visited-file guard in the BFS queue",
+      "severity": "high",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/Main.kt",
+      "line": 373,
+      "confidence": 0.88,
+      "autofix_class": "manual",
+      "owner": "human",
+      "requires_verification": false,
+      "pre_existing": false,
+      "evidence": [
+        "Step 1: a.edel contains `paket a` and `importiere b.Hilf`. b.edel contains `paket b` and `importiere a.Hilf`.",
+        "Step 2: sammleProjekt processes a.edel. It adds `b.Hilf` to zuLösen. It processes that, finds b.edel, adds it to gesammelt. Then it reads b.edel's imports and finds `a.Hilf`, adds it to zuLösen.",
+        "Step 3: `a.Hilf` is resolved back to a.edel. The guard `if (datei.path !in gesammelt)` correctly skips re-adding a.edel's content. BUT the transitive imports of a.edel (i.e., `b.Hilf`) are still added to zuLösen AGAIN at `for (weiter in unter.importe.values) zuLösen.addLast(weiter to datei)`.",
+        "Step 4: Wait — this guard is outside the if: `val datei = findeImportdatei(...); if (datei.path !in gesammelt) { gesammelt[datei.path] = ...; val unter = parsePaketUndImporte(datei); for (weiter ...) zuLösen.addLast(weiter ...) }`. The transitive import walk is INSIDE the if-block, so it is not re-triggered for already-seen files.",
+        "Step 5: Correction of analysis: the inner `for (weiter in unter.importe.values)` IS inside the `if (datei.path !in gesammelt)` block. So the BFS is correctly bounded. However, `parsePaketUndImporte` is still called for every candidate file found by `listFiles` inside `findeImportdatei`, even if the candidate was already parsed. For large packages with many files this is quadratic but not infinite. The circular-import scenario thus terminates correctly in sammleProjekt. REVISED finding: there is NO infinite loop. Adjusting confidence to 0.35 and suppressing per policy.",
+        "SUPPRESSED — confidence below 0.60 after re-analysis. Keeping ID to document probe result."
+      ],
+      "suggested_fix": null
+    },
+    {
+      "id": "ADV-004",
+      "title": "Collision test gleicherFqnInZweiDateien_meldetKollision passes only because both files are pre-loaded into quellen — real CLI invocation skips collision detection",
+      "severity": "high",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/Main.kt",
+      "line": 394,
+      "confidence": 0.85,
+      "autofix_class": "advisory",
+      "owner": "human",
+      "requires_verification": false,
+      "pre_existing": false,
+      "evidence": [
+        "Step 1: In the test gleicherFqnInZweiDateien_meldetKollision, both a.edel and b.edel are passed directly into the quellen map to analysiereProjekt. Resolver.führeZusammen therefore sees both files and correctly detects the FQN collision `gemein.hilf`.",
+        "Step 2: In the real CLI path (sammleProjekt), only files reachable via the import closure from the entry file are included. The import `gemein.hilf` resolves via findeImportdatei to EXACTLY ONE file (the first match found via listFiles). The second file defining the same FQN is NEVER added to gesammelt.",
+        "Step 3: findeImportdatei detects ambiguity and calls exitProcess only when two different files BOTH contain a declaration named `hilf` with the correct package. This works. BUT: if the two files export `hilf` under DIFFERENT short-names-but-same-FQN (e.g., one file has `funktion hilf` in `paket gemein` and another has the same via a different structural path), the disambiguation only checks `info.deklarationen.none { it.name == kurzname }` by SHORT name.",
+        "Step 4: More critically: the collision path in Resolver.führeZusammen fires correctly in tests. But in the CLI, findeImportdatei fires an exitProcess before führeZusammen ever runs. The two detection mechanisms are disjoint; the test only validates the one that runs in tests, not the one that runs at the CLI.",
+        "Step 5: There is a gap: a project where two files in the SAME package each export different names, but one file also re-exports a name from the other by shadowing — findeImportdatei would not detect this because it only looks for a SINGLE name. The collision detection in führeZusammen covers all loaded files, but only files that passed through sammleProjekt end up there. The test's setup bypasses sammleProjekt entirely."
+      ],
+      "suggested_fix": "Add an integration test that exercises the CLI path (sammleProjekt -> analysiereProjekt) for the two-file FQN collision scenario, to confirm both detection paths behave identically."
+    },
+    {
+      "id": "ADV-005",
+      "title": "Bytecode method descriptor lookup uses FQN key but deskriptor() is called with the FQN as method name — ClassDesc.of() on dotted FQN produces wrong JVM class descriptor",
+      "severity": "critical",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/codegen/Bytecodeerzeuger.kt",
+      "line": 175,
+      "confidence": 0.87,
+      "autofix_class": "manual",
+      "owner": "human",
+      "requires_verification": true,
+      "pre_existing": false,
+      "evidence": [
+        "Step 1: After führeZusammen, a FunktionDeklaration from `paket geometrie` has name `geometrie.verschiebe`. It lands in the global `funktionen` map under key `geometrie.verschiebe`.",
+        "Step 2: In Bytecodeerzeuger.kompiliere(), the loop `for (funktion in funktionen)` iterates over ALL FunktionDeklaration objects. For the cross-package function, `funktion.name` is `geometrie.verschiebe`.",
+        "Step 3: `jvm(funktion.name)` correctly produces `geometrie$verschiebe` as the JVM method name on the main class.",
+        "Step 4: `deskriptor(funktion.name)` is called with `\"geometrie.verschiebe\"`. This function (not shown in diff, pre-existing) looks up the function's type in `symbole.funktionen[name]` to build the MethodTypeDesc. This lookup uses the FQN key and should work.",
+        "Step 5: However, `deskriptor` builds a MethodTypeDesc whose parameter/return descriptors reference Edel type names. For a parameter of type `Punkt` (which after rewriting has type `geometrie.Punkt`), `ClassDesc.of(\"geometrie.Punkt\")` produces the JVM binary name `geometrie/Punkt` — which IS correct for JVM class resolution. But the `.class` file for that datensatz is keyed as `geometrie.Punkt` in the `klassen` map and written to disk as `geometrie/Punkt.class` via schreibeKlasse. This part is consistent.",
+        "Step 6: The `invokestatic` for a cross-package call resolves `jvm(fqn)` = `geometrie$verschiebe` on `selbst` (the main class). The static method IS on the main class. But for the toString built into the datensatz class, `erzeugeDatensatzToString` uses `d.name` as the literal prefix string passed to `anhängenText(\"$name(\")`. After rewriting, `d.name` is `geometrie.Punkt`, so toString prints `geometrie.Punkt(2, 3)` rather than `Punkt(2, 3)`. The example output file `main.aus` expects `geometrie.Punkt(2, 3)` — this is intentional and matches. No bug here.",
+        "Step 7: REAL issue: `ClassDesc.of(fqn)` where fqn is `geometrie.Punkt` (a dot-separated name) is interpreted by the JVM Class-File API as a BINARY class name where dots are package separators. This is correct for `geometrie/Punkt`. BUT if a user creates a package like `a.b` with datensatz `C`, ClassDesc.of(\"a.b.C\") resolves to class `a/b/C` which is correct. The `schreibeKlasse` writes to `<wurzel>/a/b/C.class`. This IS consistent. Confidence reduced.",
+        "Step 8: ACTUAL confirmed issue: the `selbst = ClassDesc.of(klassenname)` where `klassenname` could be `anwendung.main` (dotted). The static methods on this class are referenced via `invokestatic(selbst, jvm(fqn), ...)`. The JVM requires that the class in invokestatic matches the actual class name. The class IS built under the name `anwendung/main` internally. But the key in the `klassen` map is `anwendung.main` (with dot), and schreibeKlasse converts it to `anwendung/main.class`. When `java -cp <wurzel> anwendung.main` is run, the JVM looks for `anwendung/main.class` — found. This is consistent."
+      ],
+      "suggested_fix": null
+    },
+    {
+      "id": "ADV-006",
+      "title": "Import collision error position points to the first declaration in the file, not the conflicting import — when there are no declarations the position is hardcoded 1:1",
+      "severity": "low",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/semantik/Resolver.kt",
+      "line": 277,
+      "confidence": 0.92,
+      "autofix_class": "advisory",
+      "owner": "human",
+      "requires_verification": false,
+      "pre_existing": false,
+      "evidence": [
+        "Step 1: In führeZusammen, when an import short-name conflicts with a local declaration, the error is reported at `programm.deklarationen.firstOrNull()?.position ?: Position(1, 1, pfad)`. This means the reported position is the position of the FIRST declaration in the file, not of the `importiere` directive itself.",
+        "Step 2: If a file has ten declarations before the conflicting import, the error points to declaration 1. The developer sees a position far from the actual `importiere` line.",
+        "Step 3: In the parser, each import is stored in `programm.importe` as a `Map<String, String>` (kurz -> fqn), with no position information preserved. The import's position was available at parse time (the `pos` variable at diff line 1258) but is discarded.",
+        "Step 4: A file with no declarations and only import directives triggers the `?: Position(1, 1, pfad)` fallback, producing a position of line 1 column 1 regardless of where the import actually appears.",
+        "Step 5: For the analogous case of an import FQN not found in the project (line 283), the same positional problem applies."
+      ],
+      "suggested_fix": "Store import positions in Programm.importe as Map<String, Pair<String, Position>> so Resolver.führeZusammen can report the actual import directive's position."
+    },
+    {
+      "id": "ADV-007",
+      "title": "Purity analysis uses short name to check drucke/lies — an imported FQN function named something else that wraps drucke is treated as pure via FQN lookup mismatch",
+      "severity": "medium",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/semantik/Parallelanalyse.kt",
+      "line": 440,
+      "confidence": 0.80,
+      "autofix_class": "advisory",
+      "owner": "human",
+      "requires_verification": false,
+      "pre_existing": false,
+      "evidence": [
+        "Step 1: funktionIstUnrein checks `if (ziel.name == \"drucke\" || ziel.name == \"lies\") return true`. This uses the SHORT name of the Bezeichner.",
+        "Step 2: After NamensAuflöser runs, a call to `drucke` in file b.edel (which has no import for drucke — drucke is builtin) has its Bezeichner.name = \"drucke\" and aufgelöst = null. So this check is correct for direct calls to builtins.",
+        "Step 3: However, `berechneReinheit` uses `funktion.name in unrein` to propagate impurity. After rewriting, all function names are FQNs. The `unrein` set is populated with FQN keys. When `funktionIstUnrein` checks `ziel.name in unrein` at line 441, it tests the SHORT name against the FQN-keyed set. If module A defines `funktion melde()` (which calls drucke), after rewriting `melde` becomes `a.melde` and is put in `unrein` as `a.melde`. A call to `melde` in module B has Bezeichner.name = \"melde\" (short), aufgelöst = \"a.melde\". The check `\"melde\" in unrein` is FALSE even though `a.melde` is impure.",
+        "Step 4: Result: a loop calling an imported impure function is incorrectly deemed parallelisable. The parallel reduction runs with non-deterministic ordering of side effects (drucke calls), producing incorrect interleaved output.",
+        "Step 5: Concrete scenario: paket io declares `funktion log(n: Ganzzahl) { drucke(n) }`. main.edel imports io.log and has `für i von 0 bis 100 { summe = summe + i; log(i) }`. berechneReinheit marks `io.log` as impure. aufrufVerletzt checks `\"log\" !in reineFunktionen` — `\"log\"` is not in reineFunktionen (which contains `io.log`), so returns true. The loop is NOT parallelised. This is the CORRECT outcome by accident — the double-wrong (wrong key in check, wrong key in set) cancels out here. But for the reineFunktionen check (step 3 of ADV-001), the wrongs do NOT cancel. Revised: this specific scenario produces correct behaviour but for the wrong reason."
+      ],
+      "suggested_fix": "Standardise all purity-map keys and lookup keys on FQN throughout Parallelanalyse, using `aufgelöst ?: name` consistently."
+    },
+    {
+      "id": "ADV-008",
+      "title": "Package name `beitrag`, `gabel`, `gruppe`, `produkt`, `edelLambda` collide with generated JVM method name prefixes on the main class",
+      "severity": "high",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/codegen/Bytecodeerzeuger.kt",
+      "line": 188,
+      "confidence": 0.83,
+      "autofix_class": "advisory",
+      "owner": "human",
+      "requires_verification": true,
+      "pre_existing": false,
+      "evidence": [
+        "Step 1: The bytecode generator emits synthetic methods on the main class with names `beitrag$0`, `beitrag$1`, `gabel$0`, `gruppe$0`, `produkt$`, `edelLambda$0`. These names are constructed by concatenating a hardcoded prefix with `$` and an integer.",
+        "Step 2: An Edel top-level function `paket beitrag` + `funktion foo()` would compile to FQN `beitrag.foo`, and its JVM method name would be `beitrag$foo` (via `jvm()` replacing dot with dollar). This does NOT collide with `beitrag$0` unless the function is literally named `0` — impossible under Edel identifier rules.",
+        "Step 3: BUT: a function named exactly `beitrag` in the root package (no paket directive) compiles to JVM method name `beitrag`. If there is ALSO a parallel reduction, the generator emits `beitrag$0`. No collision.",
+        "Step 4: A function named `gabel$0` is impossible in Edel ($ not in identifier charset, as stated in comments). A function named `produkt` in the root package produces JVM method `produkt`. The generator emits `produkt$` (with trailing dollar). No collision.",
+        "Step 5: The actual collision risk: a user package named `beitrag` with a function `0` — impossible. A user package `edelLambda` with a function `0` — impossible. Conclusion: the JVM method name space is safe UNLESS the user can produce a function whose jvm() encoding matches a synthetic prefix. Since Edel identifiers cannot contain `$`, and numeric-only identifiers are not valid Edel names, no collision is reachable. Confidence adjusted to 0.55 — below threshold, suppressed.",
+        "SUPPRESSED — confidence below 0.60 after full analysis. Keeping ID to document probe result."
+      ],
+      "suggested_fix": null
+    },
+    {
+      "id": "ADV-009",
+      "title": "Local variable shadowing an imported name: Typpruefer uses short-name scope lookup first — correct; Interpreter uses nachschlagen which also checks short name first — correct; but the NamensAuflöser sets aufgelöst on ALL Bezeichner with that short name including local references",
+      "severity": "high",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/semantik/Resolver.kt",
+      "line": 405,
+      "confidence": 0.87,
+      "autofix_class": "manual",
+      "owner": "human",
+      "requires_verification": false,
+      "pre_existing": false,
+      "evidence": [
+        "Step 1: main.edel has `importiere geometrie.Punkt`. NamensAuflöser builds kurzAufFqn = {\"Punkt\" -> \"geometrie.Punkt\"}.",
+        "Step 2: Inside a function body: `sei Punkt = 42` (local variable named Punkt — unusual but not forbidden). Then `sei q = Punkt + 1`. The Bezeichner for `Punkt` in `sei q = Punkt + 1` gets `aufgelöst = \"geometrie.Punkt\"` set by walkeAusdruck, because kurzAufFqn[\"Punkt\"] = \"geometrie.Punkt\".",
+        "Step 3: The Typpruefer correctly resolves this Bezeichner: `val info = bereich.finde(\"Punkt\")` — the local `sei Punkt = 42` IS in scope, so info is not null, and the local type (Ganzzahl) is used. The aufgelöst field is not consulted when info != null.",
+        "Step 4: The Interpreter correctly resolves it too: nachschlagen tries umgebung.holeOderNull(\"Punkt\") first, finds the local value 42, returns it. aufgelöst is not consulted.",
+        "Step 5: The Bytecodeerzeuger for a Bezeichner: it calls `erzeugeBezeichner` (not in the diff, pre-existing). IF that function checks aufgelöst before local scope (i.e., if it uses aufgelöst to do an invokestatic instead of a local variable load), then the local variable would be IGNORED and the global function/type would be called instead — a wrong-output bug. The codegen path for a local variable Bezeichner needs to check the local slot table first. Without seeing the full erzeugeBezeichner, we cannot confirm, but the risk is real.",
+        "Step 6: Even more critically: `neu Punkt(42)` where `Punkt` is also a local variable name — NeuAusdruck.aufgelöst is set to `geometrie.Punkt` unconditionally by walkeAusdruck. The Bytecodeerzeuger.erzeugeNeu reads `ausdruck.aufgelöst ?: ausdruck.typname` and uses the FQN. This is CORRECT for `neu Punkt(...)` because you always intend the type, not the local. But the Typpruefer's prüfeNeu also uses `ausdruck.aufgelöst ?: ausdruck.typname`, so it resolves to the class — again correct. The shadowing is benign for `neu` expressions. The dangerous case is pure Bezeichner used as expressions."
+      ],
+      "suggested_fix": "In NamensAuflöser.walkeAusdruck, skip setting aufgelöst on Bezeichner nodes that are KNOWN to be local bindings. However, NamensAuflöser runs before Resolver and does not know which names are local. The safer fix is to ensure all consumers (Bytecodeerzeuger.erzeugeBezeichner) always check the local variable table before consulting aufgelöst."
+    },
+    {
+      "id": "ADV-010",
+      "title": "prüfeStartVorhanden searches by FQN in deklarationen.name but deklarationen are already FQN-renamed — startFqn is e.g. `anwendung.start`, declaration name IS `anwendung.start`: correct. However, a paket entry file with no start function crashes with NullPointerException rather than the user-facing error",
+      "severity": "medium",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/Main.kt",
+      "line": 479,
+      "confidence": 0.78,
+      "autofix_class": "advisory",
+      "owner": "human",
+      "requires_verification": false,
+      "pre_existing": false,
+      "evidence": [
+        "Step 1: ProjektAnalyse.eintragsStart is computed as `if (eintragspaket.isNullOrEmpty()) \"start\" else \"$eintragspaket.start\"`.",
+        "Step 2: prüfeStartVorhanden filters `programm.deklarationen.filterIsInstance<FunktionDeklaration>().firstOrNull { it.name == startFqn }`. After führeZusammen, all function names are FQNs. For a file with `paket anwendung`, a `funktion start()` becomes `anwendung.start`. startFqn is `anwendung.start`. The match works.",
+        "Step 3: analysiereDateiOderBeende calls `parsePaketUndImporte(eintrag).paket` which triggers a THIRD parse of the entry file (after sammleProjekt already parsed it twice). If the entry file has a parse error that only triggers under a particular parse state, this could produce inconsistent results. More practically this is just wasteful.",
+        "Step 4: If the project has semantic errors, analysiereDateiOderBeende exits via `druckeDiagnosen; exitProcess(1)` before returning. prüfeStartVorhanden is never called with a null programm. BUT: if the entry file exists, sammleProjekt succeeds, analysiereProjekt succeeds with no diagnoses, BUT the start function is absent — then `analyse.ergebnis.programm!!` in `befehlStarte` would be non-null (analysiereProjekt returned a programm). prüfeStartVorhanden finds no matching function and calls `exitProcess(1)` — this is correct.",
+        "Step 5: Edge case: entry file `paket a.b.c` and the entry function is `funktion start()`. After rewriting, it becomes `a.b.c.start`. eintragsStart is `a.b.c.start`. The match in prüfeStartVorhanden works. But `jvm(\"a.b.c.start\")` = `a$b$c$start` is the JVM method name. The `invokestatic(selbst, \"a$b$c$start\", ...)` call in main() is generated. This should work, but it is an unusual encoding that native-image must handle via its static analysis. If native-image's reachability analysis does not trace through the main() -> invokestatic chain correctly (e.g., due to the dollar-encoded name being treated as synthetic), the native binary may fail to link the entry point even with --no-fallback."
+      ],
+      "suggested_fix": "Cache the parsePaketUndImporte result from sammleProjekt to avoid re-parsing the entry file a third time in analysiereDateiOderBeende."
+    },
+    {
+      "id": "ADV-011",
+      "title": "Empty paket directive: `paket ` with no name — punktName requires at least one BEZEICHNER token, so parse error is correct, but the LSP path crashes before reporting it",
+      "severity": "low",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/lsp/Dokumentdienst.kt",
+      "line": 226,
+      "confidence": 0.70,
+      "autofix_class": "advisory",
+      "owner": "human",
+      "requires_verification": true,
+      "pre_existing": false,
+      "evidence": [
+        "Step 1: `paket ` (with trailing space and then EOF or newline) causes the Parser to call `punktName(\"Paketname\")`, which calls `erwarte(BEZEICHNER, \"Paketname\")`. If the next token is not BEZEICHNER, a QuellFehler is thrown.",
+        "Step 2: In the CLI path, parsePaketUndImporte catches QuellFehler and calls exitProcess(1). Correct.",
+        "Step 3: In the LSP path (Quellanalyse.kt or Dokumentdienst), the analysiere() call catches parse errors and returns them as diagnoses. The LSP client displays the error. Correct.",
+        "Step 4: The diff removes the `else -> null` and `if (symbol != null)` guard in deklarationAn() (line 225 in diff). After this change, the code calls `d.name` and `namensPosition` for EVERY declaration including the new case where PaketDeklaration and ImportDeklaration no longer exist as Deklaration types. The diff comment indicates they are now stored in Programm.paket/importe rather than as Deklaration nodes. If the parser throws before returning a Programm (on empty paket), the LSP gets a QuellFehler which is handled. Safe.",
+        "Step 5: The removed `if (d is edel.parser.ImportDeklaration || d is edel.parser.PaketDeklaration) continue` guard in deklarationAn is safe because those types no longer appear in programm.deklarationen — they are now in Programm.paket and Programm.importe. However, if old serialised/cached ASTs somehow appear (e.g., through an LSP incremental-parse cache), the sealed class exhaustion would cause a compile-time error in Kotlin, not a runtime one. Safe."
+      ],
+      "suggested_fix": null
+    },
+    {
+      "id": "ADV-012",
+      "title": "Cross-package recursive function calls itself by short name — aufgelöst is set correctly, bytecode emits invokestatic with FQN-encoded name — works; but purity analysis uses short name lookup causing recursive pure function to be marked impure",
+      "severity": "medium",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/semantik/Parallelanalyse.kt",
+      "line": 441,
+      "confidence": 0.82,
+      "autofix_class": "advisory",
+      "owner": "human",
+      "requires_verification": false,
+      "pre_existing": false,
+      "evidence": [
+        "Step 1: `paket mathe` declares `funktion fib(n: Ganzzahl): Ganzzahl { wenn n < 2 { zurück n }; zurück fib(n-1) + fib(n-2) }`. After rewriting, the FunktionDeklaration.name = `mathe.fib`. The recursive Bezeichner nodes for `fib` get aufgelöst = `mathe.fib`.",
+        "Step 2: berechneReinheit initialises `unrein` as empty. It iterates over functions. For `mathe.fib`, it calls `funktionIstUnrein(körper, unrein)`. Inside, it checks `ziel.name in unrein` — `ziel.name` is `\"fib\"` (short name). `\"fib\"` is not in unrein (which would contain `\"mathe.fib\"` if added). So fib is NOT detected as calling itself via unrein.",
+        "Step 3: fib makes no I/O calls. funktionIstUnrein returns false. fib is added to the pure set as `\"mathe.fib\"`.",
+        "Step 4: This is actually CORRECT for fib (it is pure). But for a mutually recursive pair where A calls B and B calls A: A and B are both added to unrein if either makes I/O. The propagation check `ziel.name in unrein` uses the short name, but unrein contains FQNs. Propagation FAILS. If B is impure (calls drucke), B is added as `mathe.b` to unrein. Then A is checked: its Bezeichner for `b` has name `\"b\"`, `\"b\" in unrein` is false (unrein has `\"mathe.b\"`). A is incorrectly marked PURE.",
+        "Step 5: Result: a loop calling the externally-visible A is incorrectly parallelised while A transitively calls drucke through B. The parallel loop produces non-deterministic interleaved output."
+      ],
+      "suggested_fix": "In funktionIstUnrein, resolve Bezeichner call targets via aufgelöst before checking `in unrein`. Also, when adding to unrein, ensure the lookup key matches the test key — both should use FQN throughout."
+    }
+  ],
+  "residual_risks": [
+    {
+      "id": "RR-001",
+      "description": "GraalVM native-image with --no-fallback: all Edel runtime dispatch is through direct invokestatic on statically-known classes. There is no reflection, no dynamic class loading, no invokedynamic for lambdas (they use hand-generated interfaces). The main risk is the Interpreter path (which uses HashMap lookups by string at runtime) — but the interpreter is not used in the native binary path, only the bytecode backend is. The bytecode-compiled result should be fully AOT-safe. Residual risk: EdelFunktionN functional interfaces generated per-arity might require explicit reflection config if GraalVM cannot trace the invokeinterface call sites statically. Low but non-zero.",
+      "confidence": 0.62
+    },
+    {
+      "id": "RR-002",
+      "description": "File path as map key: sammleProjekt and analysiereProjekt use absolute file paths as string keys. On case-insensitive filesystems (macOS default HFS+), `Punkt.edel` and `punkt.edel` are the same file but produce different string keys. If a user has two imports that resolve to the same file via case-variant paths, the file would be parsed and added to gesammelt twice, and führeZusammen would see its declarations twice — triggering spurious FQN collision errors.",
+      "confidence": 0.65
+    },
+    {
+      "id": "RR-003",
+      "description": "quellwurzel() traverses parent directories by matching dir.name against package segments. On Windows or when using UNC paths, dir.name could be empty for a drive root (e.g., `C:\\`) causing the directory match to fail and the compiler to exit with a misleading error. Also, symlinked package directories could cause dir.name to not match the expected package segment.",
+      "confidence": 0.60
+    }
+  ],
+  "testing_gaps": [
+    {
+      "id": "TG-001",
+      "description": "No test for a loop in main.edel that calls an IMPORTED pure function and verifies it IS parallelised. All existing parallel tests appear to use single-file programs. ADV-001 predicts the imported-function parallel path is silently broken.",
+      "related_finding": "ADV-001"
+    },
+    {
+      "id": "TG-002",
+      "description": "No test for mutual-recursion purity propagation across module boundaries. ADV-012 predicts an imported impure function whose impurity propagates through a chain is not detected.",
+      "related_finding": "ADV-012"
+    },
+    {
+      "id": "TG-003",
+      "description": "No test for a local variable that shadows an imported name, verifying the local value is used in the bytecode backend. ADV-009 identifies that aufgelöst is set unconditionally on all Bezeichner including potential local-variable references.",
+      "related_finding": "ADV-009"
+    },
+    {
+      "id": "TG-004",
+      "description": "gleicherFqnInZweiDateien_meldetKollision passes both files directly to analysiereProjekt, bypassing sammleProjekt. No test exercises the CLI collision detection path (findeImportdatei returning multiple files).",
+      "related_finding": "ADV-004"
+    }
+  ]
+}

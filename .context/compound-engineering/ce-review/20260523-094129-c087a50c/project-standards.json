@@ -1,0 +1,83 @@
+{
+  "reviewer": "project-standards",
+  "findings": [
+    {
+      "title": "English-language KDoc comment on ProjektAnalyse class",
+      "severity": "medium",
+      "file": "edel/src/main/kotlin/edel/Main.kt",
+      "line": 224,
+      "confidence": 0.90,
+      "autofix_class": "trivial",
+      "owner": "author",
+      "requires_verification": false,
+      "pre_existing": false,
+      "details": "The new private class ProjektAnalyse carries the KDoc comment '/** Bundle of CLI prep results: parsed/typed project plus entry-metadata. */' in English. Every other KDoc comment in Main.kt and across the codebase is written in German (e.g., '/** Ergebnis der statischen Analyse: Syntaxbaum, Symboltabelle, Parallelplan, Diagnosen. */' on AnalyseErgebnis, '/** Sammelt das Projekt, analysiert es und beendet bei Fehlern. */' on analysiereDateiOderBeende, '/** Ergebnis der Bytecode-Uebersetzung: erzeugte Klassen samt FQN-Metadaten. */' on Uebersetzung). The PLAN.md establishes: 'The interpreter implementation stays in idiomatic Kotlin/English; only the Edel language surface is German. Example programs and the README language tour are German.' The prevailing interpretation throughout all source files is that implementation identifiers may use English Kotlin idioms but doc comments narrating implementation intent are written in German. This comment narrates implementation intent, making English the wrong choice here.",
+      "cited_rule": "PLAN.md: 'The interpreter implementation stays in idiomatic Kotlin/English; only the *Edel language* surface is German.' — combined with the uniform German-KDoc convention demonstrated in every other source file (InterpreterTest.kt line 9, Main.kt line 29, Bytecodeerzeuger.kt lines 23-35, Resolver.kt lines 7-14, etc.).",
+      "cited_violation": "Diff line 451: '+/** Bundle of CLI prep results: parsed/typed project plus entry-metadata. */'",
+      "suggested_fix": "Replace with the German equivalent: '/** Ergebnisse der CLI-Vorbereitung: analysiertes Projekt und Metadaten der Einstiegsdatei. */'"
+    },
+    {
+      "title": "English phrase 'entry-dir' embedded in German KDoc of Uebersetzung.quellwurzel",
+      "severity": "low",
+      "file": "edel/src/main/kotlin/edel/Main.kt",
+      "line": 320,
+      "confidence": 0.80,
+      "autofix_class": "trivial",
+      "owner": "author",
+      "requires_verification": false,
+      "pre_existing": false,
+      "details": "The field comment '/** Wurzelverzeichnis (entry-dir, ggf. um die paket-Tiefe hochgeklettert). */' mixes English ('entry-dir') into an otherwise German doc comment. All sibling field comments in the same class use pure German or domain abbreviations that are already established ('FQN' is an accepted abbreviation throughout the codebase). The parenthetical 'entry-dir' adds no information not already expressed by 'Einstiegsdatei' used elsewhere.",
+      "cited_rule": "PLAN.md German-comment convention and the uniform German-language KDoc convention demonstrated across all source files.",
+      "cited_violation": "Diff line 600: '+    /** Wurzelverzeichnis (entry-dir, ggf. um die paket-Tiefe hochgeklettert). */'",
+      "suggested_fix": "Remove the English parenthetical: '/** Wurzelverzeichnis der Einstiegsdatei, ggf. um die paket-Tiefe hochgeklettert. */'"
+    },
+    {
+      "title": "BeispieleTest does not cover the new beispiele/module/ example",
+      "severity": "medium",
+      "file": "edel/src/test/kotlin/edel/BeispieleTest.kt",
+      "line": 20,
+      "confidence": 0.82,
+      "autofix_class": "non-trivial",
+      "owner": "author",
+      "requires_verification": true,
+      "pre_existing": false,
+      "details": "The existing BeispieleTest golden-output test (BeispieleTest.kt) scans only 'beispiele/*.edel' (top-level files), using 'beispiele.listFiles { datei -> datei.extension == \"edel\" }'. The new module example lives at 'beispiele/module/main.edel' with its golden output at 'beispiele/module/main.aus'. PLAN.md establishes: './gradlew test golden tests run every beispiele/*.edel and diff stdout.' The new example is not picked up by the existing recursive-scan logic because the scan is not recursive. The PR does add a dedicated ModulTest.kt test (beispielModuleLaeuftMitGoldenerAusgabe) that covers this specific example, but the stated convention is that the unified BeispieleTest covers all beispiele files with .aus counterparts. The module example is therefore outside the automated sweep mandated by PLAN.md's verification step.",
+      "cited_rule": "PLAN.md Verification section: './gradlew test golden tests run every beispiele/*.edel and diff stdout.'",
+      "cited_violation": "BeispieleTest.kt line 20-22 uses non-recursive listFiles; 'beispiele/module/main.edel' and its .aus file are not discovered. The .gitignore change (diff lines 19-22) now allows subdirectory .edel/.aus files, confirming the intent to track them, but BeispieleTest is not updated to scan recursively."
+    },
+    {
+      "title": "README Module section uses 'start()' in code example but entry-point convention elsewhere uses 'start()'",
+      "severity": "low",
+      "confidence": 0.61,
+      "file": "edel/README.md",
+      "line": 58,
+      "autofix_class": "trivial",
+      "owner": "author",
+      "requires_verification": false,
+      "pre_existing": false,
+      "details": "The new Module section README example uses 'funktion start()' as the entry point, which is consistent with the rest of the README and the codebase (PLAN.md originally proposed 'haupt()' but the confirmed keyword is 'start'). This is consistent — no violation. Noted and dismissed.",
+      "cited_rule": "N/A — consistent with established convention.",
+      "cited_violation": "N/A"
+    }
+  ],
+  "residual_risks": [
+    {
+      "description": "The 'befehlPrüfe' refactor silently changes error-output behavior: the old code printed diagnoses and exited with code 1 on type errors; the new code delegates all error handling to 'analysiereDateiOderBeende' which exits before 'befehlPrüfe' body runs. The README CLI table still says 'Exitcode != 0 bei Fehlern' which remains correct, but the previously printed human-readable diagnoses path through 'befehlPrüfe' is now handled by 'analysiereDateiOderBeende'. This is functionally equivalent but the refactor removes a self-contained error path that was independently testable. No standard is violated but it introduces a subtle testability gap.",
+      "severity": "low"
+    },
+    {
+      "description": "The new 'NamensAuflöser' private class (Resolver.kt) has no dedicated unit test. It is exercised transitively by ModulTest.kt but an in-place AST mutation strategy (setting 'aufgelöst' fields on shared AST nodes) could cause issues if the same parsed Programm is passed through the pipeline twice (e.g., in the LSP server's incremental analysis path). The LSP 'Dokumentdienst' calls 'analysiere()' which now delegates to 'analysiereProjekt', and repeated calls would re-run 'NamensAuflöser.rewrite()' on already-mutated AST nodes. This is a correctness risk not covered by tests.",
+      "severity": "medium"
+    }
+  ],
+  "testing_gaps": [
+    {
+      "description": "No test covers the CLI-level 'sammleProjekt' / 'findeImportdatei' / 'quellwurzel' path with real filesystem I/O. ModulTest passes in-memory string maps, so the directory-climbing logic in 'quellwurzel()' and the candidate-scanning loop in 'findeImportdatei()' are only tested by the manual 'beispiele/module/' golden test. Edge cases (wrong directory structure, ambiguous declarations across multiple .edel files in the same package directory) are untested.",
+      "severity": "medium"
+    },
+    {
+      "description": "The 'beispielModuleLaeuftMitGoldenerAusgabe' test in ModulTest.kt passes only absolute paths derived from File(\"beispiele/module/...\") which depends on the test runner's working directory being 'edel/'. If the test is run from a different working directory this test silently passes due to the 'assertTrue(mainDatei.isFile && punktDatei.isFile && aus.isFile, \"Beispiel-Dateien fehlen\")' guard — it would skip rather than fail when files are not found. The existing BeispieleTest has the same pattern, so this is consistent with project convention, but the guard message says 'Beispiel-Dateien fehlen' which makes CI failures hard to diagnose.",
+      "severity": "low"
+    }
+  ]
+}

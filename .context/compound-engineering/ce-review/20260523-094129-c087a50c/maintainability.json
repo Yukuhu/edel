@@ -1,0 +1,156 @@
+{
+  "reviewer": "maintainability",
+  "findings": [
+    {
+      "title": "Undocumented implicit contract: every consumer must call Resolver.führeZusammen before Resolver.auflösen",
+      "severity": "high",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/parser/Ast.kt",
+      "line": 64,
+      "confidence": 0.90,
+      "autofix_class": "manual",
+      "owner": "compiler-core",
+      "requires_verification": false,
+      "pre_existing": false,
+      "why_it_matters": "The mutable `aufgelöst` fields on Bezeichner, NeuAusdruck, and EinfacherTypausdruck are null at parse time and only populated by NamensAuflöser (called inside führeZusammen). Typpruefer, Bytecodeerzeuger, Parallelanalyse, and Interpreter all silently fall back to the short name when `aufgelöst` is null — which is correct after führeZusammen but silently wrong if any caller skips it. The only safeguard is that analysiereProjekt calls führeZusammen unconditionally, but that guarantee is implicit. A future developer who constructs a Programm and hands it directly to Resolver/Typpruefer (e.g., for a REPL or incremental mode) will get silent mis-resolution with no compile-time or runtime signal.",
+      "evidence": [
+        "Ast.kt:64 — `var aufgelöst: String? = null` on Bezeichner, no enforcement that it is set",
+        "Ast.kt:22 — same pattern on EinfacherTypausdruck",
+        "Ast.kt:120 — same pattern on NeuAusdruck",
+        "Resolver.kt:46 — `val schluessel = ausdruck.aufgelöst ?: ausdruck.name` — silent fallback",
+        "Typpruefer.kt:431 — `val fqn = ausdruck.aufgelöst ?: ausdruck.name` — silent fallback",
+        "Bytecodeerzeuger.kt:814 — `val fqn = ziel.aufgelöst ?: ziel.name` — silent fallback",
+        "Main.kt:68 — führeZusammen called correctly, but nothing enforces this ordering for non-CLI callers"
+      ],
+      "suggested_fix": "Add a note to the `Programm` KDoc and to the `aufgelöst` field KDocs that these fields are populated by `Resolver.führeZusammen` and must not be null in multi-module programs before type-checking. Alternatively, consider making the pre-pass a non-optional step inside `Resolver.auflösen` itself, so the ordering contract cannot be violated."
+    },
+    {
+      "title": "Dead parameter: NamensAuflöser.diagnosen is never used",
+      "severity": "medium",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/semantik/Resolver.kt",
+      "line": 326,
+      "confidence": 0.97,
+      "autofix_class": "delete",
+      "owner": "compiler-core",
+      "requires_verification": false,
+      "pre_existing": false,
+      "why_it_matters": "The DiagnoseSammler is passed into NamensAuflöser's constructor at line 290 (`NamensAuflöser(programm.paket, kurzAufFqn, diagnosen).rewrite(programm)`) and stored as a private field at line 326, but no method inside the class ever calls `diagnosen.melde(...)`. It is dead state that implies reporting capability that doesn't exist. Future maintainers may introduce error-reporting into walke*() methods trusting the field is wired correctly, unaware it was vestigial from a draft.",
+      "evidence": [
+        "Resolver.kt:326 — `private val diagnosen: DiagnoseSammler` declared",
+        "Resolver.kt:323-448 — full NamensAuflöser class: zero calls to diagnosen.melde or any other method on diagnosen",
+        "Resolver.kt:290 — call site passes diagnosen unnecessarily"
+      ],
+      "suggested_fix": "Remove the `diagnosen` parameter from NamensAuflöser's constructor and the corresponding argument at the call site (Resolver.kt:290). If validation (e.g., reporting a Bezeichner that cannot be resolved) is intended to live here in future, document that as a TODO rather than pre-wiring the infrastructure."
+    },
+    {
+      "title": "Entry-file is parsed three times on every CLI invocation",
+      "severity": "medium",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/Main.kt",
+      "line": 135,
+      "confidence": 0.88,
+      "autofix_class": "refactor",
+      "owner": "cli",
+      "requires_verification": false,
+      "pre_existing": false,
+      "why_it_matters": "For every CLI command (starte, übersetze, binär), the entry file is fully lexed and parsed three separate times: (1) inside sammleProjekt at line 137, (2) for each candidate file inside findeImportdatei at line 173 (including the entry file itself if it is in the same directory as an imported file), and (3) at line 238 to retrieve eintragsPaket. sammleProjekt at line 140 reads the file text into `gesammelt` but discards the already-parsed Programm object from line 137, forcing a re-read at line 215. analysiereProjekt then parses all files a third time from the raw source strings. This triple-parse of the entry file will be visible on large projects and creates an inconsistency: parse errors in the entry file could be reported twice with different paths.",
+      "evidence": [
+        "Main.kt:137 — parsePaketUndImporte(absolut) parses entry file (parse #1 for discovery)",
+        "Main.kt:140 — absolut.readText() re-reads entry into gesammelt, discarding parse #1",
+        "Main.kt:173 — parsePaketUndImporte called for every candidate .edel file in each package directory",
+        "Main.kt:238 — parsePaketUndImporte(eintrag).paket parses entry file again (parse #2 of entry) to get paket",
+        "Main.kt:62-63 — Lexer+Parser called inside analysiereProjekt for all files including entry (parse #3 of entry)",
+        "parsePaketUndImporte at line 214 reads file text every time it is called"
+      ],
+      "suggested_fix": "Have sammleProjekt return both the source text map and the parsed Programm of the entry file (or return a data class). Pass the entry Programm's paket directly to ProjektAnalyse instead of calling parsePaketUndImporte a second time at line 238. Separately, the discovery phase (findeImportdatei scanning each directory) already re-parses every candidate file; caching the parsed Programm per path within sammleProjekt would eliminate that overhead too."
+    },
+    {
+      "title": "führeZusammen placed as a companion-object method on Resolver despite being a distinct pre-pass",
+      "severity": "low",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/semantik/Resolver.kt",
+      "line": 230,
+      "confidence": 0.65,
+      "autofix_class": "refactor",
+      "owner": "compiler-core",
+      "requires_verification": false,
+      "pre_existing": false,
+      "why_it_matters": "führeZusammen performs a structurally distinct operation from Resolver.auflösen: it merges N Programm objects into one and rewrites AST nodes in-place, whereas Resolver.auflösen builds a GlobaleSymbole from a single already-merged Programm. The companion-object placement implies they are closely related alternatives, but they must always be called in sequence. The KDoc acknowledges the two-step nature ('das anschliessend vom bestehenden Resolver typisiert werden kann'), yet nothing in the API boundary enforces or expresses the sequence. When a language server or test driver eventually calls auflösen directly on a multi-file merged Programm, the companion-object placement is the first thing they will read — and it will mislead them into thinking führeZusammen is optional.",
+      "evidence": [
+        "Resolver.kt:230 — führeZusammen inside Resolver companion object",
+        "Resolver.kt:302 — companion object closes, followed immediately by private class NamensAuflöser in the same file",
+        "Main.kt:68-69 — the required call sequence: führeZusammen then Resolver(...).auflösen()"
+      ],
+      "suggested_fix": "Extract führeZusammen (and NamensAuflöser) into a top-level function or a separate ProjektZusammenführer class in the same package. This makes the two-step sequence visible at the call site through distinct types rather than two methods on the same class."
+    },
+    {
+      "title": "ProjektAnalyse class has an English-language KDoc comment in an otherwise fully German codebase",
+      "severity": "low",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/Main.kt",
+      "line": 224,
+      "confidence": 0.82,
+      "autofix_class": "rename",
+      "owner": "cli",
+      "requires_verification": false,
+      "pre_existing": false,
+      "why_it_matters": "The comment at line 224 reads 'Bundle of CLI prep results: parsed/typed project plus entry-metadata.' All surrounding class names, function names, field names, and comments are in German. This English comment will read as accidental to future contributors who follow the established German convention, and it models inconsistency for new contributors adding docs.",
+      "evidence": [
+        "Main.kt:224 — `/** Bundle of CLI prep results: parsed/typed project plus entry-metadata. */`",
+        "Main.kt:129-133 — surrounding KDocs are in German",
+        "Main.kt:357 — `/** Schreibt eine Klasse ... */` — German",
+        "Resolver.kt:216-228 — KDoc in German"
+      ],
+      "suggested_fix": "Replace with German: `/** Ergebnis der CLI-Vorbereitung: analysiertes Projekt mit Einstiegsmetadaten. */`"
+    },
+    {
+      "title": "quellwurzel computed redundantly in kompiliereZuBytecode after already being computed in sammleProjekt",
+      "severity": "low",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/Main.kt",
+      "line": 334,
+      "confidence": 0.78,
+      "autofix_class": "refactor",
+      "owner": "cli",
+      "requires_verification": false,
+      "pre_existing": false,
+      "why_it_matters": "sammleProjekt calls quellwurzel internally at line 138 to determine the source root for import resolution. kompiliereZuBytecode calls quellwurzel again at line 334 using the same eintrag and eintragspaket values. Two calls to the same pure computation from the same inputs is a silent coupling risk: if the logic in quellwurzel changes (e.g., a new convention for nested packages), both call sites must be updated in sync. Currently ProjektAnalyse does not carry the computed quellwurzel even though Übersetzung does.",
+      "evidence": [
+        "Main.kt:138 — `val wurzel = quellwurzel(absolut, eintragsProgramm.paket)` inside sammleProjekt",
+        "Main.kt:334 — `val quellwurzel = quellwurzel(quelldatei, analyse.eintragspaket)` inside kompiliereZuBytecode",
+        "Main.kt:225-232 — ProjektAnalyse does not expose quellwurzel"
+      ],
+      "suggested_fix": "Add `val quellwurzel: File` to ProjektAnalyse, computed once in analysiereDateiOderBeende or sammleProjekt, and reuse it in kompiliereZuBytecode."
+    }
+  ],
+  "residual_risks": [
+    {
+      "area": "AST mutation under concurrent analysis",
+      "description": "NamensAuflöser mutates AST nodes in-place (var name on Deklaration subclasses, var aufgelöst on expression nodes) while führeZusammen iterates over all files. If a future incremental compiler or language server processes multiple files concurrently, this in-place mutation will race. The current design is single-threaded so there is no immediate bug, but the var fields create a latent hazard that is hard to detect once concurrency is introduced.",
+      "severity": "medium"
+    },
+    {
+      "area": "Import collision error position quality",
+      "description": "When an import collides with a same-module declaration (Resolver.kt:275-278) or when a not-found import is reported (Resolver.kt:282-285), the error position falls back to `programm.deklarationen.firstOrNull()?.position ?: Position(1, 1, pfad)`. This means collisions on files with no declarations after the import directive point to line 1:1, losing the actual import site. The import position is available in `programm.importe` as a map key but the position information from the parser is not preserved there.",
+      "severity": "low"
+    },
+    {
+      "area": "Single-file analysiere shim relies on analysiereProjekt side-effect ordering",
+      "description": "analysiere(quelle, datei) at Main.kt:48-49 delegates to analysiereProjekt with a single-entry map. This works because führeZusammen is a no-op for a single file with no imports. If analysiereProjekt's contract changes (e.g., it requires the eintrag key to be an absolute path or have a specific format), the '<inline>' sentinel will silently break the LSP and test paths without any type error.",
+      "severity": "low"
+    }
+  ],
+  "testing_gaps": [
+    {
+      "description": "No test covers the case where Resolver or Typpruefer is called on a multi-file Programm that was NOT processed by führeZusammen. The fallback `aufgelöst ?: name` in every consumer means such a call would silently produce wrong results rather than an error, and this scenario has no test exercising it.",
+      "severity": "medium"
+    },
+    {
+      "description": "No test exercises a paket-qualified entry file (e.g., paket anwendung.kern) where quellwurzel must climb multiple directory levels. The existing paketDeklarationVerschiebtStartFqn test uses a single-segment package. The quellwurzel function's reversed-segment loop is untested for depth > 1.",
+      "severity": "medium"
+    },
+    {
+      "description": "The ambiguous-import path in findeImportdatei (Main.kt:176-182 — two files declare the same name in the same package) has no test. It only exits with an error message; there is no test verifying the error text or that the process terminates.",
+      "severity": "low"
+    },
+    {
+      "description": "ModulTest.beispielModuleLaeuftMitGoldenerAusgabe calls `Interpreter(programm, ...).starte()` with no `eintrag` argument, meaning it uses the default 'start' (line 2023). If the beispiele/module/main.edel were ever given a `paket` directive, the test would silently fail at runtime rather than at analysis time.",
+      "severity": "low"
+    }
+  ]
+}

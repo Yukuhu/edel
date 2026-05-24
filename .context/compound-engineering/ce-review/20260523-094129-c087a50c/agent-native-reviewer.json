@@ -1,0 +1,63 @@
+{
+  "reviewer": "agent-native-reviewer",
+  "findings": [
+    {
+      "title": "hilfe() not updated to mention module support",
+      "severity": "warning",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/Main.kt",
+      "line": 430,
+      "confidence": 0.97,
+      "autofix_class": "trivial",
+      "owner": "author",
+      "requires_verification": false,
+      "pre_existing": false,
+      "suggested_fix": "Add a note to the hilfe() output explaining that all file-accepting subcommands (starte, prüfe, übersetze, binär) now accept a multi-file project entry point and resolve imports transitively. For example: 'Bei Projekten mit mehreren Dateien reicht die Einstiegsdatei -- Importe (importiere) werden automatisch aufgelöst.' An agent relying on edel hilfe to discover capabilities will not learn that multi-file projects are supported."
+    },
+    {
+      "title": "Import-resolution errors in findeImportdatei lack line and column",
+      "severity": "warning",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/Main.kt",
+      "line": 164,
+      "confidence": 0.88,
+      "autofix_class": "moderate",
+      "owner": "author",
+      "requires_verification": false,
+      "pre_existing": false,
+      "suggested_fix": "The three System.err.println calls in findeImportdatei (missing directory, ambiguous import, name not found) and the quellwurzel path-mismatch error include only the referencing file path, not a line:col. Because importiere directives are now stored in Programm.importe (a Map<String,String>) rather than as positioned AST nodes, the position of the offending directive is lost after parsing. The simplest fix is to preserve the Position of each importiere token in the importe map (change it to Map<String, Pair<String, Position>> or a small data class) so that findeImportdatei can emit a full file:line:col reference. Without this, an agent that sees 'Fehler [/abs/path/main.edel]: importierter Name X wurde nicht gefunden' cannot identify the specific line to correct."
+    },
+    {
+      "title": "Semantic-phase import-not-found diagnostic points to first declaration, not the importiere line",
+      "severity": "warning",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/semantik/Resolver.kt",
+      "line": 1524,
+      "confidence": 0.85,
+      "autofix_class": "moderate",
+      "owner": "author",
+      "requires_verification": false,
+      "pre_existing": false,
+      "suggested_fix": "In Resolver.führeZusammen, when an imported FQN is not found in globaleFqn (lines 1528-1534 of the diff), the fallback position is programm.deklarationen.firstOrNull()?.position ?: Position(1,1,pfad). This points to the first top-level declaration rather than the importiere directive itself. Same issue applies to the import-collision-with-local-declaration error. Fix by storing a Position alongside each entry in Programm.importe (see above suggestion), then using that stored position here instead."
+    },
+    {
+      "title": "prüfe subcommand exits 0 even when no-start-function error would follow in starte/übersetze/binär",
+      "severity": "observation",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/Main.kt",
+      "line": 275,
+      "confidence": 0.72,
+      "autofix_class": "minor",
+      "owner": "author",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "befehlPrüfe no longer calls prüfeStartVorhanden, so edel prüfe exits 0 on a packaged entry file that is missing its start function, while edel starte on the same file exits 1. An agent using edel prüfe as a preflight check before starte would receive a false green. Consider optionally running prüfeStartVorhanden inside befehlPrüfe, or documenting that prüfe only checks types and not entry-point presence. This is low impact because it only affects packaged (paket-declared) entry files whose start FQN is non-trivial to guess without knowing the package."
+    }
+  ],
+  "residual_risks": [
+    "The Lexer.kt change is a binary diff -- it is not possible to verify from the diff alone that the new datei parameter is propagated to every token Position produced by the Lexer. If any token constructor omits the datei, diagnostics for nodes built from those tokens will lack file context even in multi-file projects.",
+    "sammleProjekt performs file-system traversal at CLI invocation time, which is correct for the agent use case. However, parsePaketUndImporte is called twice for the entry file (once in sammleProjekt, once in analysiereDateiOderBeende). This is harmless functionally but means a parse error in the entry file is reported twice on stderr before exitProcess(1). An agent parsing stderr output might see duplicate error lines.",
+    "The README module section documents java -cp beispiele/module main (without the corrected hauptklasse) as the JVM run command for a packageless entry file. For a packaged entry (e.g. paket app), the hauptklasse includes the package prefix. The README example does not show this case, so an agent following the README for a packaged project would get the wrong java command."
+  ],
+  "testing_gaps": [
+    "No test covers the CLI error-message text for findeImportdatei failures (missing directory, ambiguous, not-found). The ModulTest covers the semantic-phase path through analysiereProjekt but not the file-system resolution path in sammleProjekt. An agent-facing regression in those error strings would go undetected.",
+    "No golden-output test verifies that edel prüfe output for a multi-file project includes file paths in the parallelism-loop position lines (e.g. [beispiele/module/main.edel:14:5] rather than [14:5]). This is the primary new parseable-diagnostic surface for agents.",
+    "beispielModuleLaeuftMitGoldenerAusgabe in ModulTest constructs the quellen map manually and bypasses sammleProjekt. There is no end-to-end test that invokes the actual CLI via ProcessBuilder against beispiele/module/main.edel and checks stdout/stderr, so regressions in the sammleProjekt -> analysiereDateiOderBeende -> Interpreter chain that only manifest via the real CLI would be undetected."
+  ]
+}

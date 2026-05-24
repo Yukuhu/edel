@@ -1,0 +1,101 @@
+{
+  "reviewer": "cli-readiness",
+  "findings": [
+    {
+      "title": "All failure modes exit with code 1 -- agents cannot distinguish error categories",
+      "severity": "P1",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/Main.kt",
+      "line": 168,
+      "confidence": 0.97,
+      "autofix_class": "manual",
+      "owner": "human",
+      "requires_verification": false,
+      "pre_existing": false,
+      "suggested_fix": "Assign distinct exit codes to each failure category. A minimal taxonomy: 2 = usage error (missing/wrong argument), 3 = source file not found, 4 = import resolution failure (directory missing, symbol not found, ambiguous), 5 = parse/type error, 6 = backend unsupported feature, 7 = native-image subprocess failure, 1 = catch-all unexpected error. Create a central `exitWith(code: Int, message: String)` wrapper in Main.kt that routes all `exitProcess` calls so agents can branch on exit codes without parsing stderr. Every call site in `findeImportdatei`, `quellwurzel`, `parsePaketUndImporte`, `leseEintragsdatei`, `prüfeStartVorhanden`, and `kompiliereZuBytecode` currently calls `exitProcess(1)` unconditionally."
+    },
+    {
+      "title": "`edel prüfe` emits only prose -- no machine-readable output path",
+      "severity": "P2",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/Main.kt",
+      "line": 275,
+      "confidence": 0.95,
+      "autofix_class": "manual",
+      "owner": "human",
+      "requires_verification": false,
+      "pre_existing": false,
+      "suggested_fix": "Add a `--json` flag (or detect non-TTY via `System.console() == null` and auto-switch). When active, emit a single JSON object to stdout: `{\"ok\": true, \"parallelisiert\": {\"reduktionen\": [{\"position\": \"datei:zeile:spalte\", \"akkumulatoren\": [\"n (+)\"]}], \"streuschleifen\": [...], \"gabeln\": [...], \"gruppen\": [...]}}`. The `Position.toString()` change in `Diagnose.kt` already includes the file path token (`datei:zeile:spalte`) so the data is available; it just needs a serialization layer. Errors emitted by `druckeDiagnosen` should also be included in the JSON under an `\"fehler\"` array when `--json` is active, instead of being printed separately to stderr."
+    },
+    {
+      "title": "`edel übersetze` leaves stale `.class` files from prior builds -- agents get a corrupted classpath silently",
+      "severity": "P2",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/Main.kt",
+      "line": 364,
+      "confidence": 0.92,
+      "autofix_class": "manual",
+      "owner": "human",
+      "requires_verification": false,
+      "pre_existing": false,
+      "suggested_fix": "Before writing new class files, delete all `.class` files under `quellwurzel` that share the same base name prefix as any FQN from the previous build. The simplest safe approach: collect all `.class` files under `quellwurzel`, delete those whose stem matches a pattern the current compilation could have produced (i.e. matching any `fqn.replace('.', '/')` prefix), then write the new files. Alternatively, accept a `--ausgabe <dir>` flag to write class files into a dedicated output directory, which separates build artifacts from source and makes cleanup trivial -- agents can `rm -rf` the output dir before each compile. This also fixes the side-effect idempotency concern: running `edel uebersetze` twice with different package structures is currently not safe."
+    },
+    {
+      "title": "`edel hilfe` does not document `paket`/`importiere`, multi-file discovery, or source-root inference",
+      "severity": "P2",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/Main.kt",
+      "line": 430,
+      "confidence": 0.98,
+      "autofix_class": "manual",
+      "owner": "human",
+      "requires_verification": false,
+      "pre_existing": false,
+      "suggested_fix": "Extend the `hilfe()` body to include: (1) a MODULE section describing that all four execution subcommands accept a multi-file entry point and resolve imports transitively; (2) the path convention (`paket a.b.c` requires the file to live at `a/b/c/<name>.edel` relative to the inferred source root); (3) the source root inference rule (entry file directory, climbed up by package depth); (4) the `EDEL_NATIVE_IMAGE` environment variable for the `binaer` subcommand (already documented in error output but absent from help). Without this, an agent discovering the CLI for the first time via `edel hilfe` has no signal that modules exist or how they are resolved."
+    },
+    {
+      "title": "Source root is inferred-only -- no flag override when inference is wrong",
+      "severity": "P2",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/Main.kt",
+      "line": 195,
+      "confidence": 0.88,
+      "autofix_class": "manual",
+      "owner": "human",
+      "requires_verification": false,
+      "pre_existing": false,
+      "suggested_fix": "Add an optional `--wurzel <verzeichnis>` / `--source-root <dir>` flag parsed before the file argument. If provided, skip the `quellwurzel()` directory-climbing logic and use the supplied path directly. This is particularly important for agents that operate from a repository root and pass absolute file paths: the inferred root will be correct only if `paket` matches the directory structure exactly, and a wrong paket declaration currently causes an opaque `exitProcess(1)` with a German-language message that describes the expected path but provides no corrective action an agent can script. Example: `edel starte --wurzel /repo/src main/app.edel`."
+    },
+    {
+      "title": "`edel binaer` emits progress text to stdout -- pollutes piped output",
+      "severity": "P2",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/Main.kt",
+      "line": 380,
+      "confidence": 0.95,
+      "autofix_class": "manual",
+      "owner": "human",
+      "requires_verification": false,
+      "pre_existing": false,
+      "suggested_fix": "Move the `println(\"Uebersetze '...' mit GraalVM native-image ...\")` progress line (line 380) and the trailing blank `println()` (line 401) to `System.err.println(...)`. Only the final machine-meaningful output (`Erzeugt: ...` and `Ausfuehren mit: ...`) should go to stdout so agents can capture the binary path via stdout without stripping progress noise. The `inheritIO()` call on the `ProcessBuilder` also routes `native-image`'s own stdout/stderr through the agent's stdout; consider switching to `.redirectError(ProcessBuilder.Redirect.INHERIT).redirectOutput(ProcessBuilder.Redirect.INHERIT)` only when stderr forwarding is explicitly desired, or suppress native-image's stdout when `--json` is active."
+    }
+  ],
+  "residual_risks": [
+    {
+      "description": "`parsePaketUndImporte` is called twice for the entry file in `analysiereDateiOderBeende` (once in `sammleProjekt`, once for `eintragsPaket`). For large projects with many transitively-discovered files, each file under `findeImportdatei` also triggers a full parse of every candidate `.edel` file in the package directory. If a package directory contains many files, this O(files * candidates) parse overhead could cause slow or unbounded startup for agents running repeated `prüfe`/`starte` cycles. No caching or memoization is present in the discovery loop.",
+      "severity": "P3"
+    },
+    {
+      "description": "The `findeImportdatei` error message for a missing symbol (`importierter Name '$fqn' wurde nicht gefunden`) does not list the files that were scanned or explain why no match was found (e.g., the file exists but the `paket` declaration does not match). An agent receiving this error cannot determine whether the file is absent, misnamed, or has a wrong `paket` directive without re-running with additional tooling.",
+      "severity": "P2"
+    }
+  ],
+  "testing_gaps": [
+    {
+      "description": "No test covers `edel prüfe` stdout format stability. If the prose format of the parallelism report changes (e.g., German wording, position format), agents parsing it will silently break. A golden-output test or a `--json` contract test would catch regressions.",
+      "severity": "P2"
+    },
+    {
+      "description": "No test exercises `edel uebersetze` followed by a second `edel uebersetze` with a renamed `paket` to verify stale `.class` cleanup. The idempotency risk is untested.",
+      "severity": "P2"
+    },
+    {
+      "description": "No integration test verifies that `edel starte`, `edel prüfe`, `edel uebersetze`, and `edel binaer` all return non-zero exit codes on deliberately malformed or missing input files. Exit code correctness is only verifiable at the process level, not from unit tests of the internal functions.",
+      "severity": "P2"
+    }
+  ]
+}

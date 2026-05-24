@@ -1,0 +1,155 @@
+{
+  "reviewer": "correctness",
+  "findings": [
+    {
+      "title": "führeZusammen crashes when no declarations exist in colliding file",
+      "severity": "P1",
+      "file": "edel/src/main/kotlin/edel/semantik/Resolver.kt",
+      "line": 261,
+      "confidence": 0.88,
+      "autofix_class": "manual",
+      "owner": "review-fixer",
+      "requires_verification": false,
+      "pre_existing": false,
+      "why_it_matters": "When two files declare the same FQN, the collision-reporting code calls `deklarationen.first { d -> (paket?.plus('.') ?: '') + d.name == fqn }`. After `qualifiziere()` has already been applied (it hasn't at this point in the first pass, but the name search compares against the pre-qualified short name concatenated with the paket prefix). However more critically: if the colliding `pfad` file has zero declarations (e.g., it contains only `paket` and `importiere` directives), then `deklarationen.first { ... }` throws a `NoSuchElementException` instead of recording a diagnosis. The program crashes with an unhelpful stack trace instead of a proper error message.",
+      "evidence": [
+        "Resolver.kt:261: `dateien[pfad]!!.deklarationen.first { d -> (dateien[pfad]!!.paket?.plus('.') ?: '') + d.name == fqn }` — throws NoSuchElementException if `deklarationen` is empty or the predicate matches nothing",
+        "The search is done against `d.name` (pre-rewrite short name) concatenated with the package prefix. After `qualifiziere()` runs d.name is already the FQN, so the expression would become `paket.paket.Name` and never match for any file that has already been processed — but in practice this only runs before the rewrite loop, so the first-pass names are still short names. The real crash risk is zero-declaration files.",
+        "Test `gleicherFqnInZweiDateien_meldetKollision` uses files with declarations, so this path is untested."
+      ],
+      "suggested_fix": "Replace `.first { ... }` with `.firstOrNull { ... }?.position ?: Position(1, 1, pfad)` to avoid the crash when the predicate has no match."
+    },
+    {
+      "title": "Purity check uses short name, not FQN, to look up reineFunktionen",
+      "severity": "P1",
+      "file": "edel/src/main/kotlin/edel/semantik/Parallelanalyse.kt",
+      "line": 400,
+      "confidence": 0.92,
+      "autofix_class": "manual",
+      "owner": "review-fixer",
+      "requires_verification": false,
+      "pre_existing": false,
+      "why_it_matters": "In `aufrufVerletzt`, the line `ziel.name !in reineFunktionen` looks up the Bezeichner's *short* name in `reineFunktionen`, which is keyed by FQN after the resolver rewrites names. After the PR, all functions in a packaged module have FQN names like `geometrie.verschiebe` in `reineFunktionen`, but the call site's `Bezeichner.name` is still the short name `verschiebe`. So cross-module calls inside a loop body are always treated as impure, causing the parallelism analysis to never parallelize any loop that calls an imported function, even when it would be safe. This is a silent semantic correctness loss — no error is raised, but parallelism is suppressed for correct programs. A similar issue exists in `istReinerAusdruck` at line 128.",
+      "evidence": [
+        "Parallelanalyse.kt:400: `else -> ziel.name !in reineFunktionen` — uses `ziel.name` (short name, e.g. `verschiebe`)",
+        "Parallelanalyse.kt:128: `if (ziel.name !in reineFunktionen && ziel.name !in REINE_EINGEBAUTE) return false` — same problem in istReinerAusdruck",
+        "berechneReinheit() at line 411: `funktionen.map { it.name }.toSet() - unrein` — after führeZusammen, `it.name` is the FQN `geometrie.verschiebe`, so `reineFunktionen` contains FQNs",
+        "The Bezeichner's `name` field is the short name written by the programmer; `aufgelöst` holds the FQN. The fix in `istGlobalerName` (line 156-157) correctly uses `b.aufgelöst ?: b.name`, but `aufrufVerletzt` and `istReinerAusdruck` do not."
+      ],
+      "suggested_fix": "In `aufrufVerletzt`, use `(ziel.aufgelöst ?: ziel.name) !in reineFunktionen`. In `istReinerAusdruck`, do the same: replace `ziel.name !in reineFunktionen` with `(ziel.aufgelöst ?: ziel.name) !in reineFunktionen`."
+    },
+    {
+      "title": "analysiereProjekt aborts on first parse error, suppressing all other errors",
+      "severity": "P2",
+      "file": "edel/src/main/kotlin/edel/Main.kt",
+      "line": 295,
+      "confidence": 0.85,
+      "autofix_class": "manual",
+      "owner": "review-fixer",
+      "requires_verification": false,
+      "pre_existing": false,
+      "why_it_matters": "In `analysiereProjekt`, the parse loop does `return AnalyseErgebnis(null, null, null, listOf(fehler.diagnose))` on the first `QuellFehler` caught. In a multi-file project the remaining files are not parsed, so a syntax error in module A will hide all errors in modules B, C, etc. More critically the returned `AnalyseErgebnis` has `programm = null`, but all callers after this change only check `ergebnis.diagnosen.isNotEmpty()` — which is true — and call `exitProcess(1)`. This is safe today but the single-error-only diagnostic output is a usability regression for multi-file projects.",
+      "evidence": [
+        "Main.kt:295-300 (in analysiereProjekt): `catch (fehler: QuellFehler) { return AnalyseErgebnis(null, null, null, listOf(fehler.diagnose)) }` — terminates the loop immediately",
+        "A project with syntax errors in multiple files will only report the first one, determined by iteration order of the `LinkedHashMap`."
+      ],
+      "suggested_fix": "Accumulate parse errors across all files using the `diagnosen` DiagnoseSammler already present, store successfully parsed files, and return a combined error list. Only abort the whole pipeline (resolver, typechecker) if any parse failed."
+    },
+    {
+      "title": "Entry file parsed three times in analysiereDateiOderBeende",
+      "severity": "P2",
+      "file": "edel/src/main/kotlin/edel/Main.kt",
+      "line": 236,
+      "confidence": 0.95,
+      "autofix_class": "safe_auto",
+      "owner": "review-fixer",
+      "requires_verification": false,
+      "pre_existing": false,
+      "why_it_matters": "In `analysiereDateiOderBeende`, the entry file is parsed three times: once inside `sammleProjekt` (via `parsePaketUndImporte(absolut)` at line 137), once more inside `analysiereProjekt` (via the Lexer/Parser loop), and a third time explicitly at line 238 (`parsePaketUndImporte(eintrag).paket`) to recover the package name. The third call is redundant — the package is already available from `sammleProjekt` and from the parsed `quellen` map. If the file changes between calls (e.g., file system race) or is large, this causes unnecessary I/O and parse overhead. More importantly, `eintragsPaket` derived from the third parse could theoretically differ from what `analysiereProjekt` processed if the file changes concurrently.",
+      "evidence": [
+        "Main.kt:137: `val eintragsProgramm = parsePaketUndImporte(absolut)` — first parse",
+        "Main.kt:295-298: Lexer/Parser loop in analysiereProjekt — second parse",
+        "Main.kt:238: `val eintragsPaket = parsePaketUndImporte(eintrag).paket` — third parse"
+      ],
+      "suggested_fix": "Return the entry program's paket from `sammleProjekt`, or re-use the already-parsed `Programm` from the `quellen` derivation (which stores source text, not parsed AST). A minor refactor: have `sammleProjekt` return a pair of `(Map<String,String>, String?)` where the second element is the entry file's package."
+    },
+    {
+      "title": "Interpreter registers AufzählungstypWert under FQN but AufzählungWert typname is FQN",
+      "severity": "P2",
+      "file": "edel/src/main/kotlin/edel/laufzeit/Interpreter.kt",
+      "line": 101,
+      "confidence": 0.80,
+      "autofix_class": "manual",
+      "owner": "review-fixer",
+      "requires_verification": true,
+      "pre_existing": false,
+      "why_it_matters": "After `führeZusammen`, AufzählungDeklaration.name is rewritten to the FQN (e.g., `farben.Farbe`). In `registriereDeklarationen`, `global.definiere(d.name, AufzählungstypWert(d.name, d.varianten))` now stores it under the FQN key and the `AufzählungstypWert.typname` is the FQN. When the interpreter evaluates a field access `Farbe.Rot`, it looks up `Farbe` (short name) in the environment and won't find it — the `nachschlagen` helper checks `kurz` (short name) first and then `aufgelöst` (FQN), but `AufzählungDeklaration` produces a `Bezeichner` that is resolved to FQN. However, the `wähle` case in the interpreter compares `AufzählungWert.typname` with `AufzählungstypWert.typname` for equality — if one is a short name and the other a FQN, this breaks. The `darstelle` function also uses `w.typname` directly, so displays would show the FQN prefix.",
+      "evidence": [
+        "Interpreter.kt:101: `global.definiere(d.name, AufzählungstypWert(d.name, d.varianten))` — d.name is now FQN after führeZusammen",
+        "Interpreter.kt:466-470: FeldzugriffAusdruck on AufzählungstypWert: `AufzählungWert(basis.typname, ausdruck.feld)` — typname will be FQN",
+        "Wert.kt:88: `darstelle` for AufzählungWert: `\"${w.typname}.${w.variante}\"` — would display `farben.Farbe.Rot` instead of `Farbe.Rot`",
+        "No test covers cross-module enum usage in the interpreter"
+      ],
+      "suggested_fix": "Store the short name separately in AufzählungstypWert for display, or strip the package prefix when building the display string in `darstelle`. The lookup via `nachschlagen` is correct (uses aufgelöst), but the typname stored in AufzählungWert values affects equality comparisons and display."
+    },
+    {
+      "title": "Bytecode: `deskriptor` looks up function by FQN but `erzeugeAusdruck` for Bezeichner uses short name",
+      "severity": "P1",
+      "file": "edel/src/main/kotlin/edel/codegen/Bytecodeerzeuger.kt",
+      "line": 1402,
+      "confidence": 0.82,
+      "autofix_class": "manual",
+      "owner": "review-fixer",
+      "requires_verification": true,
+      "pre_existing": false,
+      "why_it_matters": "In `erzeugeAusdruck` for a `Bezeichner` at line 1402, the code calls `findeVariable(ausdruck.name)` using the *short* name. If the variable is not found in local scope, it throws with a message about functions not being usable as values. For functions called directly (via AufrufAusdruck path), `fqn = ziel.aufgelöst ?: ziel.name` is correctly used. However in `typVon` for Bezeichner at line 2545, `findeVariable(ausdruck.name)` is also called with the short name — this would fail if a local variable shadows a global with the same short name, because `findeVariable` only searches local scopes (not the global symbol table), which is the correct behaviour. But the concern is: if a Bezeichner with `aufgelöst` set appears in a context where it is used as a value (e.g., passed as a function-value argument), `erzeugeAusdruck` tries `findeVariable` on the short name and throws 'Funktionen koennen im Bytecode-Backend nicht als Werte verwendet werden' rather than looking up the FQN.",
+      "evidence": [
+        "Bytecodeerzeuger.kt:1402-1406: `val variable = findeVariable(ausdruck.name)` — uses short name only, no FQN fallback",
+        "Bytecodeerzeuger.kt:2545: `findeVariable(ausdruck.name)?.typ` in `typVon` — same issue",
+        "For the `AufrufAusdruck` path, line 1942 correctly uses `ziel.aufgelöst ?: ziel.name`"
+      ],
+      "suggested_fix": "In `erzeugeAusdruck` Bezeichner branch and `typVon` Bezeichner branch, try `findeVariable(ausdruck.name) ?: ausdruck.aufgelöst?.let { findeVariable(it) }` before giving up."
+    },
+    {
+      "title": "LSP Dokumentdienst: deklarationAn crashes on ImportDeklaration/PaketDeklaration removal",
+      "severity": "P2",
+      "file": "edel/src/lsp/kotlin/edel/lsp/Dokumentdienst.kt",
+      "line": 226,
+      "confidence": 0.87,
+      "autofix_class": "manual",
+      "owner": "review-fixer",
+      "requires_verification": false,
+      "pre_existing": false,
+      "why_it_matters": "The diff removes the `if (d is ImportDeklaration || d is PaketDeklaration) continue` guard in `deklarationAn`. `ImportDeklaration` and `PaketDeklaration` have been deleted from `Ast.kt` in this PR, but `deklarationAn` now iterates over all remaining Deklaration subclasses without that guard. After the PR, the `Programm` returned by the LSP path (`analysiere(quelle)` -> `analysiereProjekt`) may contain only the merged concrete subtypes, so no crash there. However the `beschreibung(d)` function also removed its `else -> d.name` branch — if a new Deklaration subclass is added in future without updating `beschreibung`, the `when` expression becomes non-exhaustive and will fail at runtime. More concretely: the `symbole` `when` block in `dokumentSymbole` also removed `else -> null` and now calls `symbole.add(Either.forRight(symbol))` unconditionally, but the `when` expression is now sealed — as long as all subtypes are handled, this is fine. The concern is the `beschreibung` when-expression must remain exhaustive.",
+      "evidence": [
+        "Dokumentdienst.kt:226: `val pos = namensPosition(text, d.position, d.name)` — `d.name` now calls on the FQN after rewrite, not the source name",
+        "Dokumentdienst.kt:234-240: `beschreibung(d)` when-expression has no else branch after PR; if Deklaration gains a new subclass, it will crash at runtime with a non-exhaustive when error"
+      ],
+      "suggested_fix": "Ensure `beschreibung` returns a default (e.g., `else -> d.name`) or is annotated to catch exhaustiveness failures at compile time. Also, the LSP server calls `analysiere(quelle)` (single-file path), not `analysiereProjekt`, so it sees a single-file Programm where imports/paket are properly stripped — no crash, but future proofing matters."
+    }
+  ],
+  "residual_risks": [
+    {
+      "area": "Cycle detection in sammleProjekt",
+      "description": "The import-closure BFS in sammleProjekt uses `datei.path !in gesammelt` to de-duplicate. If two paths resolve to the same file via different symlinks or relative vs. absolute paths, the de-duplication fails and the BFS may visit the same file twice (adding its imports twice to zuLösen). The `absoluteFile` call on the entry file is done, but `findeImportdatei` also calls `.absoluteFile` on candidates, so this should generally work — but symlink chains are untested.",
+      "severity": "P3"
+    },
+    {
+      "area": "In-place mutation of shared AST nodes across module boundaries",
+      "description": "führeZusammen calls NamensAuflöser.rewrite() which mutates declaration `name` fields and sets `aufgelöst` on Bezeichner/EinfacherTypausdruck/NeuAusdruck nodes in-place. If `analysiereProjekt` is called multiple times on the same set of pre-parsed Programm objects (e.g., in an LSP incremental rebuild), the mutations accumulate and names become double-qualified. Currently the API re-parses on every call, so this is not triggered — but it is a fragile design.",
+      "severity": "P3"
+    },
+    {
+      "area": "findeImportdatei O(n*m) repeated full-parse of all .edel files per import",
+      "description": "For each unresolved import, findeImportdatei calls parsePaketUndImporte on every .edel file in the target directory to find which file declares the needed name. In a package with many files, this causes O(files * imports) full lexer+parser runs. Not a correctness issue, but worth noting for large projects.",
+      "severity": "P3"
+    }
+  ],
+  "testing_gaps": [
+    "No test covers cross-module enum (aufzählung) usage in the interpreter — the AufzählungstypWert FQN display/equality issue (Finding 5) is untested.",
+    "No test exercises a loop body calling an imported function to verify parallelism analysis treats it as pure when it is pure (Finding 2).",
+    "No test covers a zero-declaration file (paket + importiere only, no funktion/datensatz) participating in an FQN collision (Finding 1).",
+    "No test covers a Bezeichner used as a first-class function value (not a direct call site) where the function is imported from another module — the bytecode Bezeichner path (Finding 6) is untested.",
+    "No test for the case where the entry file itself has a paket directive but imports from an unprefixed (no-paket) module."
+  ]
+}

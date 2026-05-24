@@ -1,0 +1,170 @@
+{
+  "reviewer": "testing",
+  "findings": [
+    {
+      "title": "Diagnostic tests use weak any{substring} assertion instead of pinning message and count",
+      "severity": "P1",
+      "file": "/home/andre/german/edel/src/test/kotlin/edel/ModulTest.kt",
+      "line": 112,
+      "confidence": 0.91,
+      "autofix_class": "manual",
+      "owner": "review-fixer",
+      "requires_verification": false,
+      "pre_existing": false,
+      "why_it_matters": "importDerNichtExistiert_meldetDiagnose (line 112) and gleicherFqnInZweiDateien_meldetKollision (line 136) both assert `diagnosen.any { substring in it.meldung }`. This gives false confidence: (a) the test passes if five unrelated diagnostics fire as long as one contains the substring, (b) a future message-text change does not break the test, and (c) neither test guards against duplicate or extra diagnostics. The correct invariant for both paths is exactly one diagnostic with a specific message.",
+      "evidence": [
+        "ModulTest.kt:112-115: assertTrue(ergebnis.diagnosen.any { \"mathe.fehlt\" in it.meldung }, ...)",
+        "ModulTest.kt:136-139: assertTrue(ergebnis.diagnosen.any { \"gemein.hilf\" in it.meldung }, ...)",
+        "Resolver.kt:282-285: actual message is 'Importierter Name X wurde im Projekt nicht gefunden'",
+        "Resolver.kt:259-264: actual message is 'Vollqualifizierter Name X wird sowohl in A als auch in B deklariert'"
+      ],
+      "suggested_fix": "For each test: assertEquals(1, ergebnis.diagnosen.size, \"Erwarte genau eine Diagnose\") and then assertTrue(\"mathe.fehlt\" in ergebnis.diagnosen[0].meldung) (or assertEquals on the full message). This pins both count and content."
+    },
+    {
+      "title": "Import-collides-with-local-declaration branch in Resolver.fuehreZusammen is untested",
+      "severity": "P1",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/semantik/Resolver.kt",
+      "line": 274,
+      "confidence": 0.88,
+      "autofix_class": "manual",
+      "owner": "review-fixer",
+      "requires_verification": false,
+      "pre_existing": false,
+      "why_it_matters": "Resolver.kt lines 274-279 fire when a module both declares a name locally and imports a different FQN under the same short name. The diagnostic message is 'Import X kollidiert mit einer Deklaration im selben Modul'. No test in ModulTest exercises this branch. A regression that removes the check or silently skips the continue would allow ambiguous name resolution without any diagnostic.",
+      "evidence": [
+        "Resolver.kt:274-279: if (kurz in kurzAufFqn) { diagnosen.melde(\"Import '$kurz' kollidiert mit einer Deklaration im selben Modul\", ...) }",
+        "ModulTest.kt: no test where a file declares a name locally and also imports a different FQN under the same short name"
+      ],
+      "suggested_fix": "Add a test: a file that contains both 'funktion hilf(): Ganzzahl { ... }' and 'importiere fremdes.hilf' should yield exactly one diagnostic containing 'kollidiert'. Verify diagnosen.size == 1 and the message substring."
+    },
+    {
+      "title": "Golden-example test exercises only interpreter; bytecode path for the module example is untested",
+      "severity": "P1",
+      "file": "/home/andre/german/edel/src/test/kotlin/edel/ModulTest.kt",
+      "line": 269,
+      "confidence": 0.87,
+      "autofix_class": "manual",
+      "owner": "review-fixer",
+      "requires_verification": false,
+      "pre_existing": false,
+      "why_it_matters": "beispielModuleLaeuftMitGoldenerAusgabe runs the examples through the interpreter only. The FQN encoding in Bytecodeerzeuger (jvm() '$'-encoding, schreibeKlasse multi-directory output, cross-module method invocation via invokestatic with '$'-encoded names) is never validated against the authoritative golden output. A bytecode regression producing wrong output for the module example would not be caught.",
+      "evidence": [
+        "ModulTest.kt:269: Interpreter(programm, ergebnis.parallelplan!!, { ausgabe.appendLine(it) }).starte()",
+        "ModulTest.kt: no kompiliereUndLaufe call using the beispiele/module golden files",
+        "The three bytecode tests (lines 178, 208, 226) use synthetic projects, not the golden example"
+      ],
+      "suggested_fix": "Extend beispielModuleLaeuftMitGoldenerAusgabe with a second assertion that calls kompiliereUndLaufe(quellen, eintrag=mainDatei.path, hauptklasse=\"main\", startFqn=\"start\") and compares the result to aus.readText()."
+    },
+    {
+      "title": "BeispieleTest.goldeneAusgaben uses non-recursive listFiles and silently misses beispiele/module/",
+      "severity": "P2",
+      "file": "/home/andre/german/edel/src/test/kotlin/edel/BeispieleTest.kt",
+      "line": 21,
+      "confidence": 0.93,
+      "autofix_class": "manual",
+      "owner": "review-fixer",
+      "requires_verification": false,
+      "pre_existing": false,
+      "why_it_matters": "BeispieleTest.goldeneAusgaben calls `beispiele.listFiles { datei -> datei.extension == \"edel\" }`. Java's File.listFiles() returns only direct children, not descendants. The new beispiele/module/main.edel file is one level deeper and will never be discovered. Any future module example added under a subdirectory will be silently excluded. This also means BeispieleTest provides no backstop if ModulTest is removed.",
+      "evidence": [
+        "BeispieleTest.kt:21: beispiele.listFiles { datei -> datei.extension == \"edel\" }",
+        "Java File.listFiles() returns direct children only (non-recursive)",
+        "Filesystem: beispiele/module/main.edel is at depth 2 relative to beispiele/"
+      ],
+      "suggested_fix": "Replace listFiles with walkTopDown().filter { it.isFile && it.extension == \"edel\" }. Note that module examples require multi-file analysis (analysiereProjekt) rather than single-file interpretiere, so the factory loop must detect the presence of paket/importiere directives or the presence of a sibling .aus file at the file's own directory level and dispatch accordingly."
+    },
+    {
+      "title": "Multi-segment package FQN encoding through bytecode backend untested",
+      "severity": "P2",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/codegen/Bytecodeerzeuger.kt",
+      "line": 51,
+      "confidence": 0.80,
+      "autofix_class": "manual",
+      "owner": "review-fixer",
+      "requires_verification": true,
+      "pre_existing": false,
+      "why_it_matters": "jvm() replaces all dots with '$': a function 'f' in package 'a.b' becomes JVM method name 'a$b$f'. All three bytecode tests use single-segment packages (geometrie, zahlen, anwendung). The multi-segment encoding path has never been exercised end-to-end. A bug that drops one segment, double-encodes, or produces an invalid descriptor would only surface at JVM verification time.",
+      "evidence": [
+        "Bytecodeerzeuger.kt:51: private fun jvm(fqn: String): String = fqn.replace('.', '$')",
+        "bytecodeUebersetztMehrdateiProjekt: paket geometrie (one segment)",
+        "bytecodeUebersetztPaketiertesEinstiegsprogramm: paket anwendung (one segment)",
+        "bytecodeUebersetztDatensaetzeAusFremdemPaket: paket zahlen (one segment)",
+        "No test uses paket a.b.c or any two-level package"
+      ],
+      "suggested_fix": "Add a bytecode test with a two-level package, e.g. 'paket werkzeug.zahlen' containing a datensatz and a function, imported from main.edel. Verify the output value matches expectations."
+    },
+    {
+      "title": "New parser constraint (paket/importiere after declarations raises error) has no test",
+      "severity": "P2",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/parser/Parser.kt",
+      "line": 104,
+      "confidence": 0.82,
+      "autofix_class": "manual",
+      "owner": "review-fixer",
+      "requires_verification": false,
+      "pre_existing": false,
+      "why_it_matters": "Parser.kt lines 104-108 raise QuellFehler when a paket or importiere directive appears after at least one declaration. This replaces the old behavior that silently created ImportDeklaration/PaketDeklaration nodes. The constraint is new and ParserTest has no case for directives at all. A refactor reverting to the old silent behavior would be undetected.",
+      "evidence": [
+        "Parser.kt:104-108: PAKET, IMPORTIERE -> fehler(\"...-Direktiven muessen am Anfang der Datei stehen, vor allen Deklarationen\", ...)",
+        "Parser.kt:27-28: duplicate paket directive also raises an error -- also untested",
+        "Parser.kt:36-37: importiere without a dot raises an error -- also untested",
+        "Parser.kt:39-40: duplicate importiere of same short name raises an error -- also untested",
+        "ParserTest.kt: no test references paket or importiere at all"
+      ],
+      "suggested_fix": "Add to ParserTest: (1) happy path verifying Programm.paket and Programm.importe are populated; (2) assertFailsWith<QuellFehler> for directive-after-declaration; (3) assertFailsWith<QuellFehler> for duplicate paket; (4) assertFailsWith<QuellFehler> for importiere without a dot."
+    },
+    {
+      "title": "Lambda body referring to an imported function is untested across all backends",
+      "severity": "P3",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/semantik/Resolver.kt",
+      "line": 419,
+      "confidence": 0.72,
+      "autofix_class": "advisory",
+      "owner": "human",
+      "requires_verification": true,
+      "pre_existing": false,
+      "why_it_matters": "NamensAuflöser.walkeAusdruck walks LambdaAusdruck bodies, setting aufgelöst on any Bezeichner that refers to an imported or module-qualified name. None of the 10 tests include a lambda whose body calls an imported function. The interpreter lookup path (nachschlagen with kurz then fqn) and the bytecode path (jvm(fqn) invokestatic) are therefore untested for lambdas with cross-module references.",
+      "evidence": [
+        "Resolver.kt:419-422: is LambdaAusdruck -> { e.parameter.forEach { walkeTyp(it.typ) }; walkeAusdruck(e.körper) }",
+        "Interpreter.kt:983-984: is Bezeichner -> nachschlagen(umgebung, ausdruck.name, ausdruck.aufgelöst)",
+        "No ModulTest case: no lambda that closes over or calls an imported function"
+      ],
+      "suggested_fix": "Add a test where the imported module exposes a function and the main module passes a lambda that calls it (e.g. sei f = (n: Ganzzahl) -> verdopple(n)). Verify the output."
+    },
+    {
+      "title": "Native binary path passes dotted FQN to native-image but is entirely untested",
+      "severity": "P3",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/Main.kt",
+      "line": 385,
+      "confidence": 0.70,
+      "autofix_class": "advisory",
+      "owner": "human",
+      "requires_verification": false,
+      "pre_existing": false,
+      "why_it_matters": "befehlBinär now passes ü.hauptklasse (which may be 'anwendung.main') as the main-class argument to native-image. The old code always passed the short file stem. There is no test confirming the argument is correctly formed for multi-package projects. This is acknowledged as untested (GraalVM not available in CI) but the regression risk from the FQN change is unacknowledged in comments.",
+      "evidence": [
+        "Main.kt:385: ü.hauptklasse (may contain dots for packaged entry files)",
+        "Old Main.kt: klassenname was always quelldatei.nameWithoutExtension (no dots)",
+        "No test file touches befehlBinär or findeNativeImage"
+      ],
+      "suggested_fix": "Add a comment in befehlBinär acknowledging the untested dotted-FQN main-class change. Consider a unit test for the main-class-argument construction using ProcessBuilder argument capture, or add a CLI integration test that skips when native-image is absent."
+    }
+  ],
+  "residual_risks": [
+    "analysiere() now delegates to analysiereProjekt with a synthetic '<inline>' key. If führeZusammen introduces a regression for single-file programs (e.g., wrong ordering or eintrag lookup failure), existing test suites would catch it only incidentally since they test behavior rather than the delegation path itself.",
+    "beispielModuleLaeuftMitGoldenerAusgabe uses relative File paths ('beispiele/module/main.edel') that depend on the test CWD being the edel/ subproject root. If both mainDatei.isFile and punktDatei.isFile are false, the assertTrue passes immediately and the actual comparison is never reached -- silent skip rather than test failure.",
+    "gleicherFqnInZweiDateien_meldetKollision bypasses sammleProjekt and injects both a.edel and b.edel directly into the quellen Map. This correctly tests Resolver.fuehreZusammen collision detection, but does NOT verify that the CLI's import-closure traversal (sammleProjekt/findeImportdatei) would actually discover both files in a real directory structure.",
+    "The Dokumentdienst LSP changes (removal of 'else -> null' and 'else -> {}' branches) are behavioral but have no corresponding LSP test. These are low risk since the branches handled only unexpected sealed-class variants (which Kotlin exhaustive-when already covers at compile time), but the absence of LSP tests means no regression safety net exists."
+  ],
+  "testing_gaps": [
+    "No test for import-collides-with-local-declaration (Resolver.kt:274): a file that both declares and imports under the same short name.",
+    "No test for multi-segment package (a.b.c) end-to-end through bytecode or interpreter.",
+    "No bytecode test using the authoritative golden beispiele/module/ example.",
+    "No parser tests for any of the new directive-parsing branches: paket, importiere, duplicate paket, importiere-without-dot, duplicate importiere short name, directive-after-declaration.",
+    "No test for lambda body calling an imported function in any backend.",
+    "No test for datensatz whose field type is an imported datensatz from another module (cross-module field-type dependency distinct from function-parameter position).",
+    "No test for AufzählungDeklaration across a module boundary (enum type imported and used in another module).",
+    "BeispieleTest.goldeneAusgaben does not recurse into subdirectories; new module examples added under beispiele/ subdirectories will be silently excluded.",
+    "Native binary path (befehlBinär with dotted hauptklasse argument to native-image) is entirely untested."
+  ]
+}

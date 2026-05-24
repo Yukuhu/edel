@@ -1,0 +1,75 @@
+{
+  "reviewer": "api-contract",
+  "findings": [
+    {
+      "title": "ImportDeklaration and PaketDeklaration deleted from public sealed Deklaration hierarchy",
+      "severity": "critical",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/parser/Ast.kt",
+      "line": 207,
+      "confidence": 0.95,
+      "autofix_class": "none",
+      "owner": "parser",
+      "requires_verification": false,
+      "pre_existing": false,
+      "suggested_fix": "If any downstream consumer (outside this repo) pattern-matches on `ImportDeklaration` or `PaketDeklaration`, those call sites will fail to compile. Provide a deprecation period or document the removal in the migration guide. Within this repo the LSP guard at old Dokumentdienst.kt:225 (`if (d is edel.parser.ImportDeklaration || d is edel.parser.PaketDeklaration) continue`) has been removed in the same PR, so the in-repo impact is resolved, but any external library consumer using these types will get a compile error."
+    },
+    {
+      "title": "Deklaration.name changed from val to var; NamensAuflöser rewrites it to FQN in-place, breaking consumers that read .name for display or comparison",
+      "severity": "high",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/parser/Ast.kt",
+      "line": 207,
+      "confidence": 0.90,
+      "autofix_class": "manual",
+      "owner": "parser",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "After `analysiere()` or `analysiereProjekt()`, every FunktionDeklaration / DatensatzDeklaration / KlasseDeklaration / AufzählungDeklaration / SchnittstelleDeklaration in `programm.deklarationen` will have its `.name` overwritten to the FQN (e.g. `\"geometrie.Punkt\"`) by NamensAuflöser.qualifiziere(). The LSP Dokumentdienst uses `d.name` for completion suggestions (line 283-289), documentSymbol display (lines 221-248), hover/beschreibung (lines 327-330), and go-to-definition (line 179: `it.name == bezeichner.name`). The comparison at line 179 will always fail for module symbols because `bezeichner.name` is the short user-visible name while `d.name` is now the FQN. Add a short-name alias field (or strip the package prefix) before using `.name` in display and comparison contexts, or compare using `bezeichner.aufgelöst ?: bezeichner.name` against `it.name`."
+    },
+    {
+      "title": "Position data class gained datei: String? field, changing equals/hashCode; Lexer now produces Position with datei set",
+      "severity": "high",
+      "file": "/home/andre/german/edel/src/main/kotlin/edel/fehler/Diagnose.kt",
+      "line": 4,
+      "confidence": 0.85,
+      "autofix_class": "manual",
+      "owner": "fehler",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Kotlin data classes include all constructor parameters in equals() and hashCode(). The Lexer now passes a datei path: `Lexer(quelle, pfad)` populates Position.datei. Any assertion of the form `diagnose.position == Position(zeile, spalte)` (without datei) will return false when the position was produced by the file-aware Lexer path. Tests that create expected Positions with only two arguments will silently fail inequality checks. Audit all assertion sites that compare Position values; either pass datei=null explicitly (matching the inline/single-file Lexer path) or update assertions to supply the same datei value."
+    },
+    {
+      "title": "LSP go-to-definition silently fails for imported symbols: d.name (FQN) never equals bezeichner.name (short name)",
+      "severity": "high",
+      "file": "/home/andre/german/edel/src/lsp/kotlin/edel/lsp/Dokumentdienst.kt",
+      "line": 179,
+      "confidence": 0.82,
+      "autofix_class": "manual",
+      "owner": "lsp",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "At line 179, the definition handler searches `programm.deklarationen.filterIsInstance<FunktionDeklaration>().firstOrNull { it.name == bezeichner.name }`. After `führeZusammen`, `it.name` is the FQN (e.g. `\"geometrie.verschiebe\"`) while `bezeichner.name` is the short name `\"verschiebe\"`. The comparison will always miss. The LSP currently calls single-file `analysiere()` so this does not affect users today, but the contract is already broken in the returned AST. Fix: compare `it.name == (bezeichner.aufgelöst ?: bezeichner.name)`. The same problem applies to the type declaration lookup at line 190: `it.name == typverwendung.name`."
+    },
+    {
+      "title": "LSP documentSymbol and completion expose FQN names to users after FQN rewriting",
+      "severity": "medium",
+      "file": "/home/andre/german/edel/src/lsp/kotlin/edel/lsp/Dokumentdienst.kt",
+      "line": 221,
+      "confidence": 0.80,
+      "autofix_class": "manual",
+      "owner": "lsp",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "documentSymbol (line 221-248) and completion (lines 283-289) pass `d.name` directly to the LSP protocol as the symbol/completion label. After `führeZusammen` mutates declaration names to FQNs, users will see `\"geometrie.Punkt\"` instead of `\"Punkt\"` in the outline and autocomplete list. Similarly `beschreibung` (line 327) and `signatur` (line 333-336) embed `d.name`. Strip the package prefix with `d.name.substringAfterLast('.')` for display, or introduce a separate display-name field on Deklaration."
+    }
+  ],
+  "residual_risks": [
+    "The `analysiere(quelle: String, datei: String? = null)` overload now delegates to `analysiereProjekt`. For inline/test callers that pass no `datei`, the key is `\"<inline>\"` and the `eintrag` is also `\"<inline>\"`. Position objects produced by the Lexer will have `datei = \"<inline>\"` rather than `null`. If any consumer compares positions without accounting for this sentinel value, comparisons may fail.",
+    "NamensAuflöser.rewrite() mutates the parsed Programm objects in-place (var name, var oberklasse, var schnittstellen, and aufgelöst fields on Bezeichner/NeuAusdruck/EinfacherTypausdruck). If a caller caches a Programm across multiple analysiereProjekt calls (e.g. the LSP zwischenspeicher), re-analysis will start from an already-mutated tree, potentially accumulating FQN prefixes or incorrect aufgelöst values.",
+    "The `beispielModuleLaeuftMitGoldenerAusgabe` test (ModulTest.kt line 269) calls `Interpreter(programm, parallelplan, outputFn)` without `eintrag`. Because the example entry file has no `paket`, the start function FQN is `\"start\"` and the default is correct. If the example is ever given a `paket` directive, the test will silently call the wrong entry point until a LaufzeitFehler is thrown."
+  ],
+  "testing_gaps": [
+    "No test asserts that Dokumentdienst.documentSymbol returns short names (not FQNs) for symbols in a multi-file project. The current LSP tests (if any) use single-file `analysiere()`, so the FQN-name display regression would not be caught.",
+    "No test asserts that Dokumentdienst.definition resolves go-to-definition correctly for an imported function in a multi-module document. The broken `it.name == bezeichner.name` comparison at line 179 is not exercised by any visible test.",
+    "No test constructs a Position from the file-aware Lexer path and compares it with a two-argument `Position(zeile, spalte)` to confirm equality semantics after the datei field was added. The TypprueferTest and ParserTest suites create no Position instances directly, so the changed hashCode/equals is untested."
+  ]
+}
